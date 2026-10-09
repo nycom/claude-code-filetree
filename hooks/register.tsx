@@ -1,7 +1,7 @@
 import { type BuiltinToolResults, type EngineInterface, type Register, type Timer, update } from 'claude-code'
 import { openCommand } from './open'
 
-import type { Activity, FileNode, FileTree, Theme } from '../types'
+import type { Activity, FileNode, FileTree, PanelTheme, Theme } from '../types'
 import { BRANCH_ICON, chainOf, type GitAction, gitActions, LIGHT_TONES, readOnly, readTargets, resolve, TONES } from './git'
 import type { RowSpec, RowsProps, Seg } from './rows'
 import { CHEVRON_CLOSED, CHEVRON_OPEN, fileIcon, GIT_COLOR } from './icons'
@@ -168,17 +168,17 @@ async function appearance($: EngineInterface): Promise<'light' | 'dark'> {
   }
 }
 
-async function readPrefs($: EngineInterface): Promise<void> {
+// `skin`: the skins theme about to be written, in place of the one stored.
+async function readPrefs($: EngineInterface, skin?: PanelTheme | null): Promise<void> {
   const was = { light, still }
   autoTheme = false
   try {
     // A skin on in the skins mod says light or dark itself, so the OS is not asked.
-    skinOn = Boolean((await $.state.get(SKIN_THEME)).value)
+    skinOn = Boolean(skin === undefined ? (await $.state.get(SKIN_THEME)).value : skin)
     const rows = await $.config.list()
     const theme = rows.find(r => r.key === 'theme')?.value
     autoTheme = theme === 'auto' && !skinOn
-    // Under auto with a skin on, the last OS answer stays, so turning the skin off draws it at once.
-    if (autoTheme || theme !== 'auto') light = isLight(theme, autoTheme ? await appearance($) : 'dark')
+    light = isLight(theme, autoTheme ? await appearance($) : 'dark')
     still = rows.find(r => r.key === 'reduceMotion')?.value === true
   } catch {
     light = false
@@ -1142,11 +1142,11 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => (next.called ? next(e) : undefined))
 
   // A skin going on or off in the skins mod starts or stops the appearance poll, drawn pane or not.
+  // Under theme auto the OS is asked before a skin goes off, so the first frame without it is right.
   on('state.set', { plugin: 'skins', key: 'theme' }, async ($, e, next) => {
-    const result = await next(e)
-    if (Boolean(e.value) !== skinOn) void readPrefs($)
-    return result
-  }).catch(($, e, next) => (next.called ? next(e) : undefined))
+    if (Boolean(e.value) !== skinOn) await readPrefs($, e.value)
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   on('ui.close', { id: PANE }, async ($, e, next) => {
     const result = await next(e)
@@ -1360,12 +1360,10 @@ export const register: Register = (on, options) => {
     const mode = skin ? (skin.mode === 'light' ? 'light' : 'dark') : light ? 'light' : 'dark'
     // Read even when unused, so a theme that turns up later redraws the pane.
     const saved = (await $.state.get(THEME)).value
-    // A skin on wins over Omarchy: a dark one gives its own colours, a light one the pane's light palette, as a light Omarchy theme does.
-    const theme: Theme = !skin
-      ? (omarchy && saved) || (light ? LIGHT_THEME : DEFAULT_THEME)
-      : mode === 'light'
-        ? LIGHT_THEME
-        : { fg: skin.foreground, accent: skin.accent, muted: skin.dim, urgent: skin.red, selection: skin.selection, bg: skin.background }
+    // A skin on wins over Omarchy with its own colours; a light one leaves the host's background, as skins draws on it.
+    const theme: Theme = skin
+      ? { fg: skin.foreground, accent: skin.accent, muted: skin.dim, urgent: skin.red, selection: skin.selection, bg: mode === 'light' ? '' : skin.background }
+      : (omarchy && saved) || (light ? LIGHT_THEME : DEFAULT_THEME)
     const tones = mode === 'light' ? LIGHT_TONES : TONES
     const gitc = GIT_COLOR[mode]
     const now = await $.clock.now()

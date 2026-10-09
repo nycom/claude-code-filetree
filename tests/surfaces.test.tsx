@@ -1189,6 +1189,7 @@ const skins = {
 const skin = (theme: unknown) => ({ command: 'skin', args: JSON.stringify(theme), origin: { kind: 'person' }, presentation: { isFullscreen: true, columns: 200 } }) as any
 const DRACULA = { mode: 'dark', accent: '#ff79c6', foreground: '#f8f8f2', dim: '#bd93f9', red: '#ff5555', selection: '#44475a', background: '#282a36' }
 const NORD = { mode: 'dark', accent: '#88c0d0', foreground: '#eceff4', dim: '#d8dee9', red: '#bf616a', selection: '#434c5e', background: '#2e3440' }
+const DAWN = { mode: 'light', accent: '#a3206c', foreground: '#1f1f1f', dim: '#6b6b6b', red: '#b3261e', selection: '#e8c8da', background: '#ffffff' }
 const OMARCHY = 'accent = "#7aa2f7"\nforeground = "#c0caf5"\nselection = "#33467c"\nbackground = "#1a1b26"\n'
 
 test('the skin chosen in the skins mod colours the pane over the Omarchy theme and redraws it on /skin', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
@@ -1216,7 +1217,7 @@ const DARK_GIT = ['"#c186f9"', '"#e5c07b"', '"#98c379"']
 const LIGHT_GIT = ['"#820bf4"', '"#866100"', '"#2b753f"']
 const gitWorld = (root: string) => ({ os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: root, dirs: { [root]: [['a.ts', 'file'], ['b.ts', 'file']] }, status: '## main\0 M a.ts\0?? b.ts\0', numstat: '' }) as World
 
-test('with skins off the pane keeps the Omarchy theme; a light skin draws the light palette, tones and git colours over it', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+test('with skins off the pane keeps the Omarchy theme; a light skin draws its own colours on the host background, with light tones and git colours', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
   const ran: Ran = []
   const root = '/home/k/proj'
   const clock = world(on, { ...gitWorld(root), theme: { toml: OMARCHY, mtimeMs: 1 } }, ran)
@@ -1230,11 +1231,11 @@ test('with skins off the pane keeps the Omarchy theme; a light skin draws the li
   let shown = await texts(ui)
   for (const c of [...omarchy, ...DARK_GIT]) expect(shown).toContain(c)
   expect(shown).not.toContain('#282a36')
-  await $.command.run(skin({ ...DRACULA, mode: 'light', background: '#faf9f5' }))
+  await $.command.run(skin(DAWN))
   await clock.settle()
   shown = await texts(ui)
-  for (const c of [...LIGHT_GIT, '"activeBg":"#9ca3af"']) expect(shown).toContain(c)
-  for (const c of ['#1a1b26', '#33467c', '#c0caf5', '#7aa2f7', '#faf9f5', ...DARK_GIT]) expect(shown).not.toContain(c)
+  for (const c of [...LIGHT_GIT, '"activeBg":"#e8c8da"', '"fg":"#1f1f1f"', '#a3206c', '#6b6b6b']) expect(shown).toContain(c)
+  for (const c of ['#1a1b26', '#33467c', '#c0caf5', '#7aa2f7', '"backgroundColor":"#', ...DARK_GIT]) expect(shown).not.toContain(c)
   await ui.unmount()
 })
 
@@ -1275,12 +1276,13 @@ for (const [claude, mode] of [['light', 'dark'], ['dark', 'light']] as const) {
     const clock = world(on, gitWorld(root), ran)
     on('config.list', () => themeSetting(claude))
     await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
-    await $.command.run(skin({ ...DRACULA, mode }))
+    const theme = mode === 'dark' ? DRACULA : DAWN
+    await $.command.run(skin(theme))
     await clock.settle()
     const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
     await clock.settle()
     const shown = await texts(ui)
-    for (const c of mode === 'dark' ? DARK_GIT : [...LIGHT_GIT, '"activeBg":"#9ca3af"']) expect(shown).toContain(c)
+    for (const c of [...(mode === 'dark' ? DARK_GIT : LIGHT_GIT), `"activeBg":"${theme.selection}"`]) expect(shown).toContain(c)
     for (const c of mode === 'dark' ? LIGHT_GIT : DARK_GIT) expect(shown).not.toContain(c)
     await ui.unmount()
   })
@@ -1319,25 +1321,25 @@ test('theme auto with a skin on asks the OS nothing; with the skin off the appea
   await ui.unmount()
 })
 
-test('turning a skin off under theme auto draws the last OS appearance at once, before the OS is asked again', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+test('turning a skin off under theme auto asks the OS before the pane draws without it, though the OS was never asked', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
   const ran: Ran = []
   const root = '/Users/k/proj'
   const w: World = { os: 'darwin', env: { HOME: '/Users/k', TMPDIR: '/tmp/' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', appearance: '' }
   const clock = world(on, w, ran)
   on('config.list', () => themeSetting('auto'))
+  await $.command.run(skin(DRACULA))
   await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
   await clock.settle()
   const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
   await clock.settle()
-  expect(await texts(ui)).toContain('"activeBg":"#9ca3af"')
-  await $.command.run(skin(DRACULA))
-  await clock.settle()
   expect(await texts(ui)).toContain('"activeBg":"#44475a"')
   w.appearanceDelays = [5_000]
-  await $.command.run(skin(null))
+  const off = $.command.run(skin(null))
   await clock.settle()
-  expect(await texts(ui)).toContain('"activeBg":"#9ca3af"')
+  expect(await texts(ui)).not.toContain('"activeBg":"#6b7280"')
   await clock.advance(5_000)
+  await off
+  await clock.settle()
   expect(await texts(ui)).toContain('"activeBg":"#9ca3af"')
   await ui.unmount()
 })
