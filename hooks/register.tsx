@@ -2,7 +2,7 @@ import { type BuiltinToolResults, type EngineInterface, type Register, type Time
 import { openCommand } from './open'
 
 import type { Activity, FileNode, FileTree, Theme } from '../types'
-import { BRANCH_ICON, chainOf, type GitAction, gitActions, readOnly, readTargets, resolve, TONES } from './git'
+import { BRANCH_ICON, chainOf, type GitAction, gitActions, LIGHT_TONES, readOnly, readTargets, resolve, TONES } from './git'
 import type { RowSpec, RowsProps, Seg } from './rows'
 import { CHEVRON_CLOSED, CHEVRON_OPEN, fileIcon, GIT_COLOR } from './icons'
 import {
@@ -14,8 +14,11 @@ import {
   formatSize,
   inside,
   isAbsolute,
+  isLight,
   join,
+  LIGHT_THEME,
   mapper,
+  middle,
   parseGit,
   parseNumstat,
   parseTheme,
@@ -36,7 +39,6 @@ const TREE = { plugin: 'filetree', key: 'tree' } as const
 const THEME = { plugin: 'filetree', key: 'theme' } as const
 const ACTIVITY = { plugin: 'filetree', key: 'activity' } as const
 const PANE = 'filetree'
-const SHIMMER = Object.fromEntries(Object.entries(TONES).map(([k, v]) => [k, { bright: v.bright, dim: v.dim }]))
 const BRANCH_ROW = '#branch'
 const FLASH_MS = 2700
 const RUNNING_MAX_MS = 600_000
@@ -46,10 +48,14 @@ const FIND_LIMIT = 200
 const READ_REVEAL_LIMIT = 12
 const SEARCH_REVEAL_LIMIT = 60
 const ACTIVITY_TTL_MS = 45_000
-const ADD_COLOR = '#98c379'
-const DEL_COLOR = '#e06c75'
+const HOST_BG = { dark: '#262624', light: '#faf9f5' }
+const SCAN_DEPTH = 6
+const LOCKFILES = ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'Cargo.lock', 'uv.lock', 'poetry.lock', 'go.sum', 'Gemfile.lock', 'composer.lock']
+const MARK: Record<string, string> = { read: 'r', write: 'w', commit: '●' }
 const THEME_FILE = '.local/state/omarchy/current/theme/colors.toml'
 const THEME_POLL_MS = 2000
+const THEME_MISSING_POLL_MS = 60_000
+const APPEARANCE_POLL_MS = 60_000
 const FONT_SCRIPT =
   'if command -v fc-list >/dev/null 2>&1; then f=$(fc-list ":charset=$1" file | head -n1 | cut -d: -f1); ' +
   'else f=$(ls "$HOME"/Library/Fonts/*Nerd* /Library/Fonts/*Nerd* 2>/dev/null | head -n1); fi; ' +
@@ -66,7 +72,13 @@ const SIZE_WALK_LIMIT = 50_000
 
 let blink: Timer | null = null
 let themePoll: Timer | null = null
+let themeEpoch = 0
+let appearancePoll: Timer | null = null
+let autoTheme = false
+let paneOpen = false
 let themeMtime: number | null = null
+let themePath = ''
+let omarchy = false
 let generation = 0
 let lastPress = { key: '', at: 0 }
 let noNerd = false
@@ -84,6 +96,11 @@ let searchIndex: { root: string; paths: Promise<string[]> } | null = null
 let activityId = 0
 let pointer = true
 let view = { from: 0, max: 0 }
+let paneRoom = 0
+let sizeTick = false
+let light = false
+let still = false
+const marks = new Map<string, string>()
 let lastSync = 0
 let noDock = false
 let home = ''
@@ -122,10 +139,64 @@ function clean(segs: Seg[]): Seg[] {
   return segs
 }
 
-function faint(hex: string): string {
+// The hover row: the selection colour a fifth of the way from the host background, so muted text stays ≥4.5:1.
+function faint(hex: string, base: string): string {
   const v = parseInt(hex.slice(1), 16)
-  const ch = (shift: number) => Math.round(0x26 + (((v >> shift) & 255) - 0x26) * 0.3)
+  const b = parseInt(base.slice(1), 16)
+  const ch = (shift: number) => Math.round(((b >> shift) & 255) + (((v >> shift) & 255) - ((b >> shift) & 255)) * 0.2)
   return `#${[16, 8, 0].map(x => ch(x).toString(16).padStart(2, '0')).join('')}`
+}
+
+async function appearance($: EngineInterface): Promise<'light' | 'dark'> {
+  const os = await osName($)
+  const windows = os === 'win32' || (os === 'linux' && Boolean(await $.env.get('WSL_DISTRO_NAME')))
+  const argv =
+    os === 'darwin'
+      ? ['defaults', 'read', '-g', 'AppleInterfaceStyle']
+      : windows
+        ? [os === 'win32' ? 'reg' : 'reg.exe', 'query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize', '/v', 'AppsUseLightTheme']
+        : ['gsettings', 'get', 'org.gnome.desktop.interface', 'color-scheme']
+  try {
+    const run = await $.process.run(argv, { timeoutMs: 3_000 })
+    if (os === 'darwin') return /dark/i.test(run.stdout) ? 'dark' : 'light'
+    if (run.exitCode !== 0 || !run.stdout.trim()) return 'dark'
+    return windows ? (/0x1\b/.test(run.stdout) ? 'light' : 'dark') : /dark/.test(run.stdout) ? 'dark' : 'light'
+  } catch {
+    return 'dark'
+  }
+}
+
+async function readPrefs($: EngineInterface): Promise<void> {
+  const was = { light, still }
+  autoTheme = false
+  try {
+    const rows = await $.config.list()
+    const theme = rows.find(r => r.key === 'theme')?.value
+    autoTheme = theme === 'auto'
+    light = isLight(theme, autoTheme ? await appearance($) : 'dark')
+    still = rows.find(r => r.key === 'reduceMotion')?.value === true
+  } catch {
+    light = false
+  }
+  pollAppearance($)
+  if (light !== was.light || still !== was.still) $.ui.invalidate('ui.render')
+}
+
+// Pane open state: set where this plugin opens the pane, by ui.close, and by a render (a pane the host restored raises no open).
+function paneShown($: EngineInterface, open: boolean): void {
+  const reopened = open && !paneOpen
+  paneOpen = open
+  if (reopened) void readPrefs($)
+  else pollAppearance($)
+}
+
+// ponytail: under theme auto, with the pane open, a system appearance flip shows within 60s; a host appearance event would make it instant.
+function pollAppearance($: EngineInterface): void {
+  if (autoTheme && paneOpen && !appearancePoll) appearancePoll = $.clock.every(APPEARANCE_POLL_MS, () => void readPrefs($))
+  else if (!(autoTheme && paneOpen) && appearancePoll) {
+    appearancePoll.cancel()
+    appearancePoll = null
+  }
 }
 
 async function get($: EngineInterface): Promise<FileTree> {
@@ -133,7 +204,13 @@ async function get($: EngineInterface): Promise<FileTree> {
 }
 
 async function put($: EngineInterface, fn: (t: FileTree) => FileTree): Promise<void> {
-  await update($, TREE, cur => fn({ ...emptyTree(''), ...cur }))
+  let sized = false
+  await update($, TREE, cur => {
+    const next = fn({ ...emptyTree(''), ...cur })
+    sized = next.showSize
+    return next
+  })
+  if (sized) queueSizes($)
 }
 
 function patch($: EngineInterface, fn: (t: FileTree) => Partial<FileTree>) {
@@ -271,12 +348,28 @@ async function reset($: EngineInterface, root: string, focus = false): Promise<v
   sizeEpoch += 1
   sizeQueue = []
   await put($, () => ({ ...emptyTree(root), showHidden: prev.showHidden, showSize: prev.root ? prev.showSize : sizeDefault }))
-  const title = `Files: ${root.split('/').pop() || root}`
-  if (focus) await $.ui.open({ id: PANE, title, focus: true })
-  else if (!noDock) await $.ui.open({ id: PANE, title })
+  // Only /filetree opens a closed pane here; an open one just takes the new root's title.
+  if (focus || (paneOpen && !noDock)) {
+    await $.ui.open({ id: PANE, title: titleOf(root), ...(focus ? { focus: true } : {}) })
+    paneShown($, true)
+  }
   await loadDirs($, [root])
   await detectRepo($)
   await refreshGit($)
+}
+
+const titleOf = (root: string) => `Files: ${root.split('/').pop() || root}`
+
+// Auto-open: only on a real file change, and never re-open a pane that is already showing.
+// Never throws, so the caller still refreshes the tree; a pane left unplaced (too narrow) is opened again on the next change.
+async function showOnChange($: EngineInterface): Promise<void> {
+  if (paneOpen || noDock) return
+  paneOpen = true
+  const opened = await get($)
+    .then(t => $.ui.open({ id: PANE, title: titleOf(t.root) }))
+    .catch(() => null)
+  paneOpen = false
+  if (opened?.isPlaced) paneShown($, true)
 }
 
 async function revealPaths($: EngineInterface, paths: string[]): Promise<void> {
@@ -338,7 +431,7 @@ async function changedSince($: EngineInterface, root: string, since: Since, dept
 }
 
 async function changedInRepo($: EngineInterface, root: string, since: Since, before: Record<string, Change>, ignored: string[]): Promise<{ hits: string[]; gone: string[] }> {
-  if (since.os !== 'win32') return { hits: await changedSince($, root, since, 0, ignored), gone: [] }
+  if (since.os !== 'win32') return { hits: await changedSince($, root, since, SCAN_DEPTH, ignored), gone: [] }
   if (dirty.root !== root) return { hits: [], gone: [] }
   const entries = Object.entries(dirty.files)
   const gone = entries.filter(([p, c]) => c === 'del' && before[p] !== 'del').map(([p]) => p)
@@ -418,9 +511,49 @@ function pumpSizes($: EngineInterface): void {
   }
 }
 
-function wantSizes($: EngineInterface, dirs: string[]): void {
-  for (const dir of dirs) if (!sizing.has(dir) && !sizeQueue.includes(dir)) sizeQueue.push(dir)
+// Sizes the folders in view after the tree changed: a job queued off the write, never from the drawing.
+function queueSizes($: EngineInterface): void {
+  if (sizeTick) return
+  sizeTick = true
+  $.clock.after(0, () => {
+    sizeTick = false
+    void wantSizes($)
+  })
+}
+
+async function wantSizes($: EngineInterface): Promise<void> {
+  const t = await get($)
+  if (!t.showSize || !paneRoom) return
+  const { pinned, shown } = layout(t, paneRoom)
+  for (const r of [...pinned, ...shown]) {
+    const dir = r.node.id
+    if (r.node.kind === 'dir' && !(dir in t.dirSizes) && !sizing.has(dir) && !sizeQueue.includes(dir)) sizeQueue.push(dir)
+  }
   pumpSizes($)
+}
+
+function layout(t: FileTree, room: number) {
+  const rows = visibleRows(t)
+  const bright = new Set(t.flashOn ? t.flash : [])
+  const dimmed = new Set(t.flashOn ? t.flashDim : [])
+  const isLit = (id: string) => bright.has(id) || dimmed.has(id)
+  const focus = followClaude && t.flashOn ? ([...t.flash].reverse().find(id => id !== BRANCH_ROW) ?? t.cursor) : t.cursor
+  const at = Math.max(0, rows.findIndex(r => r.node.id === focus))
+  const lit = followClaude && t.flashOn ? rows.findIndex(r => isLit(r.node.id)) : -1
+  const cap = Math.max(1, Math.floor(room / 3))
+  let from = Math.max(0, Math.min(lit >= 0 && at - lit < room - 2 ? Math.max(0, lit - 1) : at - Math.floor(room / 2), rows.length - room))
+  let pinned = followClaude && t.flashOn ? rows.slice(0, from).filter(r => isLit(r.node.id)).slice(-cap) : []
+  if (pinned.length) {
+    const rest = Math.max(3, room - pinned.length)
+    from = Math.max(0, Math.min(at - Math.floor(rest / 2), rows.length - rest))
+    pinned = rows.slice(0, from).filter(r => isLit(r.node.id)).slice(-cap)
+  }
+  const max = Math.max(0, rows.length - room)
+  if (t.scroll !== null) {
+    from = Math.max(0, Math.min(t.scroll, max))
+    pinned = []
+  }
+  return { rows, from, max, pinned, shown: rows.slice(from, from + room - pinned.length), bright, dimmed }
 }
 
 async function staleSizes($: EngineInterface, paths?: string[]): Promise<void> {
@@ -446,11 +579,16 @@ function keepTop(cur: FileTree, expanded: string[]): Partial<FileTree> {
   return at < 0 ? {} : { scroll: at }
 }
 
-async function flash($: EngineInterface, tones: Record<string, string>): Promise<void> {
+async function flash($: EngineInterface, tones: Record<string, string>, kinds: Record<string, string>): Promise<void> {
   const unique = Object.keys(tones)
   if (unique.length === 0) return
   const mine = ++generation
   const root = (await get($)).root
+  for (const id of unique) {
+    const mark = MARK[kinds[id] ?? 'write'] ?? 'w'
+    marks.set(id, mark)
+    for (const a of ancestorsOf(id, root)) if (!marks.has(a)) marks.set(a, mark)
+  }
   blink?.cancel()
   blink = null
   await patch($, cur => {
@@ -490,6 +628,7 @@ async function flash($: EngineInterface, tones: Record<string, string>): Promise
   blink = $.clock.after(FLASH_MS, () => {
     if (generation !== mine) return
     blink = null
+    marks.clear()
     void patch($, cur => (generation === mine ? { flash: [], flashDim: [], flashOn: false, flashTones: {} } : {}))
   })
 }
@@ -676,17 +815,21 @@ async function afterBash($: EngineInterface, jobs: Job[]): Promise<void> {
   else if (!t.top && (await exists($, join(t.root, '.git')))) await detectRepo($)
   const probed = await get($)
   if (probed.top && (writes || probed.top !== t.top)) await refreshGit($)
-  if (writes) {
-    searchIndex = null
-    await staleSizes($)
-  }
+  if (writes) searchIndex = null
   const fresh = await get($)
   const ignored = new Set(fresh.ignored)
   const tones: Record<string, string> = {}
+  const kinds: Record<string, string> = {}
   if (writes) {
     const found = fresh.top
       ? await changedInRepo($, t.root, since, before, fresh.ignored)
       : { hits: since.os === 'win32' ? [] : await changedSince($, t.root, since, NO_REPO_DEPTH), gone: [] }
+    const capped = found.hits.some(p => relative(t.root, p).split('/').length >= (fresh.top ? SCAN_DEPTH : NO_REPO_DEPTH))
+    // The scan is blind to pruned or ignored folders (node_modules) and past its depth cap: re-size everything when it placed no write,
+    // and the blind folders when a lockfile changed (an install also wrote into them).
+    const installed = found.hits.some(p => LOCKFILES.includes(p.slice(p.lastIndexOf('/') + 1)))
+    const blind = installed ? Object.keys(fresh.dirSizes).filter(d => underAny(d, ignored, t.root) || relative(t.root, d).split('/').some(s => PRUNE.includes(s))) : []
+    await staleSizes($, capped || found.hits.length + found.gone.length === 0 ? undefined : [...found.hits, ...found.gone, ...blind])
     const hits = found.hits.filter(x => inside(t.root, x) && !underAny(x, ignored, t.root)).slice(0, FIND_LIMIT)
     await revealPaths($, hits)
     const loaded = await get($)
@@ -694,6 +837,7 @@ async function afterBash($: EngineInterface, jobs: Job[]): Promise<void> {
     const listed = await loadDirs($, dirs)
     if (!fresh.top && since.os === 'win32')
       for (const kids of listed.values()) for (const n of kids) if (n.mtime > since.ms && hits.length < FIND_LIMIT) hits.push(n.id)
+    if (hits.length || found.gone.length) await showOnChange($)
     await patch($, cur => {
       const ids = new Set(cur.nodes.map(n => n.id))
       return { expanded: cur.expanded.filter(id => ids.has(id)) }
@@ -711,7 +855,10 @@ async function afterBash($: EngineInterface, jobs: Job[]): Promise<void> {
     if (found.length) {
       await revealPaths($, found)
       const shown = new Set((await get($)).nodes.map(n => n.id))
-      for (const r of found) if (shown.has(r) && !tones[r]) tones[r] = 'purple'
+      for (const r of found) if (shown.has(r) && !tones[r]) {
+        tones[r] = 'purple'
+        kinds[r] = 'read'
+      }
     }
   }
   if (showWrites && actions.length) {
@@ -721,13 +868,16 @@ async function afterBash($: EngineInterface, jobs: Job[]): Promise<void> {
       const paths = (await gitPaths($, final.root, final.prefix, committed)).filter(x => !underAny(x, ignored, final.root)).slice(0, READ_REVEAL_LIMIT)
       await revealPaths($, paths)
       const shown = new Set((await get($)).nodes.map(n => n.id))
-      for (const x of paths) if (shown.has(x)) tones[x] = 'green'
+      for (const x of paths) if (shown.has(x)) {
+        tones[x] = 'green'
+        kinds[x] = 'commit'
+      }
     }
     const pushLike = actions.find(a => ['push', 'pull', 'fetch', 'checkout', 'switch', 'branch', 'merge', 'rebase', 'tag'].includes(a.verb) || a.kind.startsWith('gh '))
     if (pushLike) tones[BRANCH_ROW] = pushLike.tone
     else if (committed) tones[BRANCH_ROW] = 'green'
   }
-  await flash($, tones)
+  await flash($, tones, kinds)
 }
 
 function scheduleScan($: EngineInterface, job: Job): void {
@@ -763,9 +913,14 @@ async function touched($: EngineInterface, paths: string[], tone: string, show: 
     await refreshGit($)
   } else await revealPaths($, within)
   if (!show) return
+  if (tone !== 'purple') await showOnChange($)
   const tones: Record<string, string> = {}
-  for (const p of within) tones[p] = tone
-  await flash($, tones)
+  const kinds: Record<string, string> = {}
+  for (const p of within) {
+    tones[p] = tone
+    kinds[p] = tone === 'purple' ? 'read' : 'write'
+  }
+  await flash($, tones, kinds)
 }
 
 async function reveal($: EngineInterface, paths: string[]): Promise<void> {
@@ -907,19 +1062,34 @@ async function openNode($: EngineInterface, n: FileNode): Promise<void> {
   } else await openFile($, n.id)
 }
 
-async function loadTheme($: EngineInterface): Promise<void> {
-  const path = `${(await $.env.get('HOME')) ?? ''}/${THEME_FILE}`
+// Returns whether the theme file exists; a stat skips an unchanged one.
+async function loadTheme($: EngineInterface): Promise<boolean> {
   try {
-    const stat = await $.fs.stat(path)
+    const stat = await $.fs.stat(themePath)
     if (stat.kind !== 'file') throw new Error('no theme file')
-    if (stat.mtimeMs === themeMtime) return
-    await $.state.set(THEME, parseTheme(String(await $.fs.read(path))))
+    if (stat.mtimeMs === themeMtime) return true
+    const theme = parseTheme(String(await $.fs.read(themePath)))
+    omarchy = theme !== null
+    await $.state.set(THEME, theme ?? DEFAULT_THEME)
     themeMtime = stat.mtimeMs
+    return true
   } catch {
-    if (themeMtime === 0) return
+    if (themeMtime === 0) return false
+    omarchy = false
     await $.state.set(THEME, DEFAULT_THEME)
     themeMtime = 0
+    return false
   }
+}
+
+// A present theme is polled every 2s to follow switches; a missing one every minute, so one set up later is still picked up.
+// Each fresh call takes a new epoch and cancels the old timer synchronously; a chain still awaiting a stat when superseded stops itself.
+async function watchTheme($: EngineInterface, mine = ++themeEpoch): Promise<void> {
+  if (mine !== themeEpoch) return
+  themePoll?.cancel()
+  const found = await loadTheme($)
+  if (mine !== themeEpoch) return
+  themePoll = $.clock.after(found ? THEME_POLL_MS : THEME_MISSING_POLL_MS, () => void watchTheme($, mine))
 }
 
 function shortPath(path: string): string {
@@ -947,18 +1117,30 @@ export const register: Register = (on, options) => {
       } catch {
         noNerd = true
       }
-      await loadTheme($)
-      themePoll?.cancel()
-      themePoll = themeMtime ? $.clock.every(THEME_POLL_MS, () => void loadTheme($)) : null
+      await readPrefs($)
+      themePath = `${home}/${THEME_FILE}`
+      await watchTheme($)
       const t = await get($)
+      marks.clear()
       if (t.flashOn) await patch($, () => ({ flash: [], flashDim: [], flashOn: false, flashTones: {} }))
       await setActivities($, cur => cur.map(a => (a.state === 'running' ? { ...a, state: 'failed', label: `${a.kind} interrupted` } : a)))
       const cwd = await cwdOf($)
       if (!t.root || t.nodes.length === 0 || (follow && t.root !== cwd)) await reset($, cwd)
-      else if (!noDock) await $.ui.open({ id: PANE, title: `Files: ${t.root.split('/').pop() || t.root}` })
     })()
     return next(e)
   })
+
+  on('config.set', async ($, e, next) => {
+    const result = await next(e)
+    if (result.deny === undefined && (e.key === 'theme' || e.key === 'reduceMotion')) await readPrefs($)
+    return result
+  }).catch(($, e, next) => (next.called ? next(e) : undefined))
+
+  on('ui.close', { id: PANE }, async ($, e, next) => {
+    const result = await next(e)
+    paneShown($, false)
+    return result
+  }).catch(($, e, next) => (next.called ? next(e) : undefined))
 
   on('command.run', { command: 'filetree' }, async ($, e) => {
     if (!e.presentation.isFullscreen) return { text: 'filetree shows in the sidebar, which needs the fullscreen layout. Run /tui fullscreen, then /filetree.' }
@@ -1151,51 +1333,43 @@ export const register: Register = (on, options) => {
     if (e.surface !== 'terminal' && e.surface !== 'desktop') return next(e)
     if (e.surface === 'terminal' && e.props.placement === 'inline') {
       noDock = true
+      paneShown($, false)
       void $.ui.close({ id: PANE }).catch(() => undefined)
       const { Box: Empty } = $.ui.resolve(e)
       return <Empty />
     }
+    // A pane the host restored is open too, so showOnChange must not open it again.
+    if (!paneOpen) paneShown($, true)
     const unicode = glyphSetting === 'plain' || (glyphSetting === 'auto' && (noNerd || e.surface === 'desktop'))
     const { Box, Text, Button, Input, Client } = $.ui.resolve(e)
     const t = await get($)
-    const theme: Theme = (await $.state.get(THEME)).value ?? DEFAULT_THEME
+    const mode = light ? 'light' : 'dark'
+    // Read even when unused, so a theme that turns up later redraws the pane.
+    const saved = (await $.state.get(THEME)).value
+    const theme: Theme = (omarchy && saved) || (light ? LIGHT_THEME : DEFAULT_THEME)
+    const tones = light ? LIGHT_TONES : TONES
+    const gitc = GIT_COLOR[mode]
     const now = await $.clock.now()
     const live = (await activities($)).filter(a => now - a.at < (a.state === 'running' ? RUNNING_MAX_MS : ACTIVITY_TTL_MS))
     const latest = [...live].reverse().find(a => a.state === 'running') ?? live[live.length - 1]
-    const bright = new Set(t.flashOn ? t.flash : [])
-    const dimmed = new Set(t.flashOn ? t.flashDim : [])
     const ignored = new Set(t.ignored)
     const untracked = new Set(t.untrackedDirs)
     const width = Math.max(24, e.props.bodyColumns)
-    const rows = visibleRows(t)
     const fixed = 2 + (t.top ? (t.branch ? 1 : 0) : 1) + (t.selected || latest ? 1 : 0)
-    const room = Math.max(5, (e.props.scroll?.bodyRows ?? 40) - fixed)
-    const isLit = (id: string) => bright.has(id) || dimmed.has(id)
-    const focus = followClaude && t.flashOn ? ([...t.flash].reverse().find(id => id !== BRANCH_ROW) ?? t.cursor) : t.cursor
-    const at = Math.max(0, rows.findIndex(r => r.node.id === focus))
-    const lit = followClaude && t.flashOn ? rows.findIndex(r => isLit(r.node.id)) : -1
-    const cap = Math.max(1, Math.floor(room / 3))
-    let from = Math.max(0, Math.min(lit >= 0 && at - lit < room - 2 ? Math.max(0, lit - 1) : at - Math.floor(room / 2), rows.length - room))
-    let pinned = followClaude && t.flashOn ? rows.slice(0, from).filter(r => isLit(r.node.id)).slice(-cap) : []
-    if (pinned.length) {
-      const rest = Math.max(3, room - pinned.length)
-      from = Math.max(0, Math.min(at - Math.floor(rest / 2), rows.length - rest))
-      pinned = rows.slice(0, from).filter(r => isLit(r.node.id)).slice(-cap)
-    }
-    const max = Math.max(0, rows.length - room)
-    if (t.scroll !== null) {
-      from = Math.max(0, Math.min(t.scroll, max))
-      pinned = []
-    }
+    const body = Math.max(5, (e.props.scroll?.bodyRows ?? 40) - fixed)
+    const { rows, from, max, pinned, shown, bright, dimmed } = layout(t, body)
     view = { from, max }
-    const shown = rows.slice(from, from + room - pinned.length)
-    if (t.showSize) wantSizes($, [...pinned, ...shown].filter(r => r.node.kind === 'dir' && !(r.node.id in t.dirSizes)).map(r => r.node.id))
+    // A resized pane shows other folders: queue their sizes once, off the drawing.
+    if (body !== paneRoom) {
+      paneRoom = body
+      if (t.showSize) queueSizes($)
+    }
     const totals: [number, number] = t.top ? (t.diff[t.root] ?? [0, 0]) : [0, 0]
     const countSegs = (c: [number, number, number] | undefined): Seg[] => {
       if (!c) return []
       const out: Seg[] = []
-      if (c[0] > 0) out.push({ t: ` ?:${c[0]}`, c: GIT_COLOR['?'] ?? ADD_COLOR })
-      if (c[1] > 0) out.push({ t: ` M:${c[1]}`, c: GIT_COLOR.M ?? '#e5c07b' })
+      if (c[0] > 0) out.push({ t: ` ?:${c[0]}`, c: gitc['?'] })
+      if (c[1] > 0) out.push({ t: ` M:${c[1]}`, c: gitc.M })
       if (c[2] > 0) out.push({ t: ` D:${c[2]}`, c: theme.urgent })
       return out
     }
@@ -1207,7 +1381,7 @@ export const register: Register = (on, options) => {
       const own = t.git[n.id]
       const status = own ?? (underAny(dirname(n.id), untracked, t.root) ? '?' : undefined)
       const isIgnored = !status && underAny(n.id, ignored, t.root)
-      const gitColor = status === 'D' || status === 'U' ? theme.urgent : status ? (GIT_COLOR[status] ?? theme.muted) : undefined
+      const gitColor = status === 'D' || status === 'U' ? theme.urgent : status ? (gitc[status] ?? theme.muted) : undefined
       const isBright = bright.has(n.id)
       const isDim = !isBright && dimmed.has(n.id)
       const tone = t.flashTones[n.id] ?? 'orange'
@@ -1225,14 +1399,15 @@ export const register: Register = (on, options) => {
         : loc
           ? ''
           : n.kind === 'file'
-            ? stamp(n.mtime)
+            ? stamp(n.mtime, now)
             : ''
       const locText = loc ? `${loc[0] ? ` +${loc[0]}` : ''}${loc[1] ? ` -${loc[1]}` : ''}` : ''
       const dirCounts = n.kind === 'dir' ? countSegs(t.counts[n.id]) : []
-      const badge = dirCounts.length ? '' : status ? ` ${status}` : isIgnored ? (unicode ? ' ⊘' : ' \u{f05e}') : '  '
+      const mark = isBright || isDim ? marks.get(n.id) : undefined
+      const badge = dirCounts.length ? '' : mark ? ` ${mark}` : status ? ` ${status}` : isIgnored ? (unicode ? ' ⊘' : ' \u{f05e}') : '  '
       const countsText = dirCounts.map(c => c.t).join('')
       const cols = Math.max(4, width - r.depth * 2 - 6 - (meta ? meta.length + 1 : 0) - locText.length - badge.length - countsText.length)
-      const name = n.name.length > cols ? n.name.slice(0, cols - 1) + '…' : n.name
+      const name = middle(n.name, cols)
       const caret = n.kind === 'dir' ? (unicode ? (r.open ? '▾' : '▸') : r.open ? CHEVRON_OPEN : CHEVRON_CLOSED) + ' ' : '  '
       const isRepo = n.kind === 'dir' && n.id === t.top
       const glyph = unicode ? (n.kind === 'dir' ? '■' : '·') : fileIcon(n, r.open, isRepo)
@@ -1245,10 +1420,10 @@ export const register: Register = (on, options) => {
       ]
       const right: Seg[] = []
       if (meta) right.push({ t: ` ${meta}`, c: theme.muted })
-      if (loc && loc[0] > 0) right.push({ t: ` +${loc[0]}`, c: ADD_COLOR })
-      if (loc && loc[1] > 0) right.push({ t: ` -${loc[1]}`, c: DEL_COLOR })
+      if (loc && loc[0] > 0) right.push({ t: ` +${loc[0]}`, c: gitc['+'] })
+      if (loc && loc[1] > 0) right.push({ t: ` -${loc[1]}`, c: gitc['-'] })
       right.push(...dirCounts)
-      if (badge) right.push({ t: badge, c: status ? gitColor : theme.muted, b: true })
+      if (badge) right.push({ t: badge, c: mark ? tones[tone]?.solid : status ? gitColor : theme.muted, b: true })
       return { id: n.id, left: clean(left), right: clean(right) }
     }
 
@@ -1274,12 +1449,12 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="row" height={1} overflow="hidden">
           <Box flexDirection="row" flexShrink={0}>
-            <Text color={isFlash ? (TONES[tone]?.solid ?? theme.accent) : theme.accent}>{(unicode ? BRANCH_ICON.plain : BRANCH_ICON.nerd) + ' '}</Text>
-            <Text bold color={isFlash ? (TONES[tone]?.solid ?? (theme.fg || undefined)) : theme.fg || undefined}>
+            <Text color={isFlash ? (tones[tone]?.solid ?? theme.accent) : theme.accent}>{(unicode ? BRANCH_ICON.plain : BRANCH_ICON.nerd) + ' '}</Text>
+            <Text bold color={isFlash ? (tones[tone]?.solid ?? (theme.fg || undefined)) : theme.fg || undefined}>
               {label}
             </Text>
-            {b.ahead > 0 && <Text color={TONES.teal?.solid}>{` ↑${b.ahead}`}</Text>}
-            {b.behind > 0 && <Text color={TONES.blue?.solid}>{` ↓${b.behind}`}</Text>}
+            {b.ahead > 0 && <Text color={tones.teal?.solid}>{` ↑${b.ahead}`}</Text>}
+            {b.behind > 0 && <Text color={tones.blue?.solid}>{` ↓${b.behind}`}</Text>}
           </Box>
           {b.upstream && (
             <Box flexShrink={1} overflow="hidden">
@@ -1290,8 +1465,8 @@ export const register: Register = (on, options) => {
           )}
           <Box flexGrow={1} />
           <Box flexDirection="row" flexShrink={0}>
-            {totals[0] > 0 && <Text color={ADD_COLOR}>{` +${totals[0]}`}</Text>}
-            {totals[1] > 0 && <Text color={DEL_COLOR}>{` -${totals[1]}`}</Text>}
+            {totals[0] > 0 && <Text color={gitc['+']}>{` +${totals[0]}`}</Text>}
+            {totals[1] > 0 && <Text color={gitc['-']}>{` -${totals[1]}`}</Text>}
             {rootCounts.map(c => (
               <Text color={c.c}>{c.t}</Text>
             ))}
@@ -1303,7 +1478,7 @@ export const register: Register = (on, options) => {
 
     const chip = (a: Activity) => {
       const tone = a.state === 'failed' ? 'red' : a.tone
-      const color = TONES[tone]?.solid ?? theme.accent
+      const color = tones[tone]?.solid ?? theme.accent
       const icon = unicode ? a.plain : a.nerd
       const hash = a.state === 'done' && a.kind === 'git commit' ? a.detail.split(' ')[0] ?? '' : ''
       return (
@@ -1407,7 +1582,7 @@ export const register: Register = (on, options) => {
         <Client
           key="rows"
           module="./rows.tsx"
-          props={{ rows: specs, active: t.cursor, activeBg: theme.selection, hoverBg: faint(theme.selection), tones: SHIMMER, pointer, ...(bar ? { bar } : {}) } satisfies RowsProps}
+          props={{ rows: specs, active: t.cursor, activeBg: theme.selection, hoverBg: faint(theme.selection, theme.bg || HOST_BG[mode]), tones, ...(theme.fg ? { fg: theme.fg } : {}), still, pointer, ...(bar ? { bar } : {}) } satisfies RowsProps}
         />
         <Box flexGrow={1} />
         {(t.selected || latest) && (

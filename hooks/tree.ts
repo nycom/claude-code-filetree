@@ -8,11 +8,25 @@ const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'bas
 
 export const DEFAULT_THEME: Theme = {
   fg: '',
-  accent: '#5b9bd5',
-  muted: '#808a96',
-  urgent: '#d0605e',
+  accent: '#68a3d8',
+  muted: '#98a1ab',
+  urgent: '#e48189',
   selection: '#6b7280',
   bg: '',
+}
+
+export const LIGHT_THEME: Theme = {
+  fg: '',
+  accent: '#2d69aa',
+  muted: '#5a6572',
+  urgent: '#b2394a',
+  selection: '#9ca3af',
+  bg: '',
+}
+
+// Claude Code's `theme` setting: light*, dark*, or auto, which follows the system appearance.
+export function isLight(setting: unknown, system: 'light' | 'dark'): boolean {
+  return typeof setting === 'string' && (setting.startsWith('light') || (setting === 'auto' && system === 'light'))
 }
 
 export function emptyTree(root: string): FileTree {
@@ -42,12 +56,14 @@ export function emptyTree(root: string): FileTree {
   }
 }
 
-export function parseTheme(toml: string): Theme {
+// An Omarchy colors.toml; null for a light one (`mode = "light"`), whose palette is left to Claude Code's own theme.
+export function parseTheme(toml: string): Theme | null {
+  if (/^mode\s*=\s*"light"/m.test(toml)) return null
   const get = (k: string) => toml.match(new RegExp(`^${k}\\s*=\\s*"(#[0-9a-fA-F]{6})"`, 'm'))?.[1]
   return {
     fg: get('foreground') ?? get('color7') ?? DEFAULT_THEME.fg,
     accent: get('accent') ?? get('color4') ?? DEFAULT_THEME.accent,
-    muted: get('muted') ?? get('color8') ?? DEFAULT_THEME.muted,
+    muted: get('dark_foreground') ?? get('muted') ?? get('color8') ?? DEFAULT_THEME.muted,
     urgent: get('red') ?? get('color1') ?? DEFAULT_THEME.urgent,
     selection: get('selection') ?? DEFAULT_THEME.selection,
     bg: get('dark_background') ?? get('background') ?? DEFAULT_THEME.bg,
@@ -309,11 +325,47 @@ export function visibleRows(t: FileTree): Row[] {
   return rows
 }
 
-export function stamp(ms: number): string {
+export function stamp(ms: number, now: number): string {
   if (!ms) return ''
   const d = new Date(ms)
   const p = (v: number) => String(v).padStart(2, '0')
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+  const days = (now - ms) / 86_400_000
+  if (d.toDateString() === new Date(now).toDateString()) return `${p(d.getHours())}:${p(d.getMinutes())}`
+  if (days > 0 && days < 7) return `${Math.max(1, Math.floor(days))}d`
+  if (days > 0 && days < 56) return `${Math.floor(days / 7)}w`
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}`
+}
+
+const segmenter = typeof Intl.Segmenter === 'function' ? new Intl.Segmenter() : null
+const graphemes = (s: string) => (segmenter ? Array.from(segmenter.segment(s), x => x.segment) : Array.from(s))
+
+// ponytail: East Asian Wide/Fullwidth ranges and emoji presentation count 2 cells, everything else 1; full UAX #11 if names misalign.
+const WIDE = /[\u1100-\u115f\u2e80-\u303e\u3041-\u33ff\u3400-\u4dbf\u4e00-\u9fff\ua000-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6\u{20000}-\u{3fffd}]|\p{Emoji_Presentation}|\ufe0f/u
+const cell = (g: string) => (WIDE.test(g) ? 2 : 1)
+
+export function cells(s: string): number {
+  return graphemes(s).reduce((n, g) => n + cell(g), 0)
+}
+
+// Cuts the middle of a name to `cols` terminal cells, keeping its extension: `very-lo…e.test.ts`.
+export function middle(name: string, cols: number): string {
+  const g = graphemes(name)
+  if (g.reduce((n, x) => n + cell(x), 0) <= cols) return name
+  const budget = Math.max(1, cols - 1)
+  const take = (list: string[], room: number) => {
+    const out: string[] = []
+    let used = 0
+    for (const x of list) {
+      if (used + cell(x) > room) break
+      out.push(x)
+      used += cell(x)
+    }
+    return { out, used }
+  }
+  const dot = name.lastIndexOf('.')
+  const ext = dot > 0 ? cells(name.slice(dot)) : 0
+  const tail = take([...g].reverse(), ext && ext < budget - 1 ? Math.max(ext, Math.floor(budget / 3)) : Math.floor(budget / 3))
+  return `${take(g, budget - tail.used).out.join('')}…${tail.out.reverse().join('')}`
 }
 
 export function formatSize(bytes: number): string {

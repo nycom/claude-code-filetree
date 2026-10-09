@@ -1,6 +1,6 @@
 import type { ClientModule } from 'claude-code'
 
-export type Seg = { t: string; c?: string; b?: boolean; s?: boolean; i?: boolean; sh?: string; dim?: boolean; one?: boolean; spin?: boolean; bg?: string; tab?: string }
+export type Seg = { t: string; c?: string; b?: boolean; s?: boolean; i?: boolean; sh?: string; dim?: boolean; one?: boolean; bg?: string }
 export type RowSpec = { id: string; left: Seg[]; right: Seg[] }
 export type RowsProps = {
   rows: RowSpec[]
@@ -8,14 +8,14 @@ export type RowsProps = {
   activeBg: string
   hoverBg: string
   tones: Record<string, { bright: string[]; dim: string[] }>
-  spinner?: string[]
+  fg?: string
+  still?: boolean
   pointer?: boolean
   bar?: { pos: number; size: number; thumb: string; track: string }
 }
 type Local = { hover: number; phase: number; drag: boolean; ref: { stop?: () => void; unpoint?: () => void } }
 
 const TICK_MS = 90
-const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
 function shimmer(i: number, phase: number, len: number, palette: string[]): string {
   const band = ((phase * 1.6) % (len + 8)) - 4
@@ -30,7 +30,7 @@ const Rows: ClientModule<RowsProps, Local> = (props, surface) => {
     state = { hover: -1, phase: 0, drag: false, ref: {} }
     surface.setState(state)
   }
-  const lit = props.rows.some(r => r.left.some(s => s.sh || s.spin) || r.right.some(s => s.sh || s.spin))
+  const lit = !props.still && props.rows.some(r => r.left.some(s => s.sh) || r.right.some(s => s.sh))
   if (lit && !state.ref.stop) {
     state.ref.stop = surface.every(TICK_MS, () => {
       const cur = surface.state
@@ -69,72 +69,67 @@ const Rows: ClientModule<RowsProps, Local> = (props, surface) => {
       return
     }
     if (e.type !== 'down' || (e.button ?? 'left') !== 'left' || !row) return
-    let x = 0
-    for (const seg of row.left) {
-      const w = [...seg.t].length
-      if (seg.tab && e.x >= x && e.x < x + w) {
-        surface.post({ tab: seg.tab })
-        return
-      }
-      x += w
-    }
     if (row.id) surface.post({ press: row.id, ctrl: Boolean(e.ctrl), shift: Boolean(e.shift) })
   })
   surface.onKey(e => surface.post({ key: e.key, ctrl: Boolean(e.ctrl), shift: Boolean(e.shift) }))
-  const frames = props.spinner?.length ? props.spinner : FRAMES
-  const draw = (s: Seg) => {
-    if (s.spin) {
-      return (
-        <Text color={s.c} bold={s.b}>
-          {s.t + (frames[state.phase % frames.length] ?? '')}
-        </Text>
-      )
-    }
-    const palette = s.sh ? (s.dim ? props.tones[s.sh]?.dim : props.tones[s.sh]?.bright) : undefined
+  // The cursor row's background is the selection colour: its text is drawn in the foreground, never a tone.
+  const draw = (active: boolean) => (s: Seg) => {
+    const palette = s.sh && !active ? (s.dim ? props.tones[s.sh]?.dim : props.tones[s.sh]?.bright) : undefined
     if (!palette) {
       return (
-        <Text color={s.c} backgroundColor={s.bg} bold={s.b} strikethrough={s.s} italic={s.i}>
+        <Text color={active ? props.fg : s.c} backgroundColor={s.bg} bold={s.b} strikethrough={s.s} italic={s.i}>
           {s.t}
         </Text>
       )
     }
-    if (s.one) {
+    if (s.one || props.still) {
       return (
-        <Text color={shimmer(-1, state.phase, s.t.length, palette)}>
+        <Text color={props.still ? palette[0] : shimmer(-1, state.phase, s.t.length, palette)} bold={s.b}>
           {s.t}
         </Text>
       )
     }
+    // One Text per run of same-coloured characters: the band spans a handful of runs, not one per character.
     const chars = [...s.t]
+    const runs: { c: string; t: string }[] = []
+    chars.forEach((ch, i) => {
+      const c = shimmer(i, state.phase, chars.length, palette)
+      const last = runs[runs.length - 1]
+      if (last?.c === c) last.t += ch
+      else runs.push({ c, t: ch })
+    })
     return (
       <Text bold={s.b}>
-        {chars.map((ch, i) => (
-          <Text color={shimmer(i, state.phase, chars.length, palette)}>{ch}</Text>
+        {runs.map(r => (
+          <Text color={r.c}>{r.t}</Text>
         ))}
       </Text>
     )
   }
   return (
     <Box flexDirection="column">
-      {props.rows.map((r, i) => (
+      {props.rows.map((r, i) => {
+        const active = Boolean(r.id) && r.id === props.active
+        return (
         <Box
           flexDirection="row"
           height={1}
           overflow="hidden"
-          backgroundColor={r.id && r.id === props.active ? props.activeBg : r.id && i === state.hover ? props.hoverBg : undefined}
+          backgroundColor={active ? props.activeBg : r.id && i === state.hover ? props.hoverBg : undefined}
         >
           <Box flexShrink={1} overflow="hidden">
-            {r.left.map(draw)}
+            {r.left.map(draw(active))}
           </Box>
           <Box flexGrow={1} />
-          {r.right.map(draw)}
+          {r.right.map(draw(active))}
           {props.bar && (
             <Text color={i >= props.bar.pos && i < props.bar.pos + props.bar.size ? props.bar.thumb : props.bar.track}>
               {i >= props.bar.pos && i < props.bar.pos + props.bar.size ? '┃' : '│'}
             </Text>
           )}
         </Box>
-      ))}
+        )
+      })}
     </Box>
   )
 }

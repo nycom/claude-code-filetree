@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { ancestorsOf, formatSize, replaceChildren, toNodes } from '../hooks/tree'
+import { ancestorsOf, cells, formatSize, isLight, middle, parseTheme, replaceChildren, stamp, toNodes } from '../hooks/tree'
 
 type World = {
   os: 'darwin' | 'linux' | 'win32'
@@ -20,6 +20,10 @@ type World = {
   du?: Record<string, string>
   duDelays?: number[]
   links?: string[]
+  appearance?: string
+  mtimes?: Record<string, number>
+  openFails?: boolean
+  unplaced?: boolean
 }
 type Ran = string[][]
 const opens: unknown[] = []
@@ -35,7 +39,8 @@ function world(on: any, w: World, ran: Ran) {
   on('command.register', () => ({ value: undefined }))
   on('ui.open', (_$: any, e: any) => {
     opens.push(e)
-    return { value: { isPlaced: true } }
+    if (w.openFails) throw new Error('no room for the pane')
+    return { value: { isPlaced: !w.unplaced } }
   })
   on('ui.toast', (_$: any, e: any) => {
     ran.push(['toast', String(e.text ?? e.message ?? JSON.stringify(e))])
@@ -54,7 +59,7 @@ function world(on: any, w: World, ran: Ran) {
     if (w.denied?.includes(bare)) return { deny: `EACCES: permission denied, scandir '${path}'` }
     const kids = dirOf(path)
     if (!kids) throw new Error(`ENOENT ${e.path}`)
-    const value = kids.map(([name, kind]) => ({ name, kind, size: 1, mtimeMs: 1_700_000_000_000, isLink: w.links?.includes(`${bare}/${name}`) ?? false }))
+    const value = kids.map(([name, kind]) => ({ name, kind, size: 1, mtimeMs: w.mtimes?.[name] ?? 1_700_000_000_000, isLink: w.links?.includes(`${bare}/${name}`) ?? false }))
     const delay = w.delays?.[bare]?.shift()
     if (delay) await clock.sleep(delay)
     return { value }
@@ -85,6 +90,8 @@ function world(on: any, w: World, ran: Ran) {
       if (delay) await clock.sleep(delay)
       return ok(w.du?.[argv.at(-1) ?? ''] ?? '')
     }
+    if (argv[0] === 'defaults') return w.appearance ? ok(w.appearance) : { value: { exitCode: 1, stdout: '', stderr: 'does not exist', isStdoutTruncated: false, isStderrTruncated: false } }
+    if (argv[0] === 'reg.exe') return ok(w.appearance ?? '')
     if (argv[0] === 'uname') return ok(w.os === 'darwin' ? 'Darwin\n' : 'Linux\n')
     if (argv[0] === 'sh') return ok('missing\n')
     if (argv[0] === 'git') {
@@ -114,7 +121,7 @@ async function texts(ui: any): Promise<string> {
   return JSON.stringify(await ui.drawn()) + rows
 }
 
-const STAMP = /\d{4}-\d{2}-\d{2} \d{2}:\d{2}/
+const STAMP = /" (\d{4}-\d{2}|\d{2}:\d{2}|\d+[dw])"/
 const NERD = /[\u{e000}-\u{f8ff}\u{f0000}-\u{fffff}]/u
 
 test('macOS Claude Code app: desktop pane draws, selects, opens with open', { timeoutMs: 20_000 }, async ($, on) => {
@@ -411,7 +418,7 @@ test('sidebar only: no pane in the default layout, and an inline pane closes its
   const closed: unknown[] = []
   on('ui.close', (_$: any, e: any) => {
     closed.push(e)
-    return {}
+    return { value: undefined }
   })
   await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
   await clock.settle()
@@ -709,20 +716,50 @@ test('the pane takes its background from the Omarchy theme and follows a theme s
   await ui.unmount()
 })
 
-test('without an Omarchy theme the pane keeps the terminal background and nothing polls', { timeoutMs: 20_000 }, async ($, on) => {
+test('without an Omarchy theme the pane keeps the terminal background; a missing theme is re-checked every minute, a present one every 2s', { timeoutMs: 20_000 }, async ($, on) => {
   const ran: Ran = []
   const root = '/home/k/proj'
-  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '' }, ran)
+  const w: World = { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '' }
+  const clock = world(on, w, ran)
+  const stats = () => ran.filter(a => a[0] === 'theme-stat').length
   await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
   await clock.settle()
   const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
   await clock.settle()
-  const stats = ran.filter(a => a[0] === 'theme-stat').length
+  expect(await texts(ui)).not.toContain('"backgroundColor":"#')
+  const missing = stats()
   await clock.advance(10_000)
   await clock.settle()
-  expect(ran.filter(a => a[0] === 'theme-stat').length).toBe(stats)
+  expect(stats()).toBe(missing)
+  w.theme = { toml: 'background = "#1e1e2e"\n', mtimeMs: 1 }
+  await clock.advance(50_000)
+  await clock.settle()
+  expect(stats()).toBe(missing + 1)
+  expect(await texts(ui)).toContain('"backgroundColor":"#1e1e2e"')
+  await clock.advance(10_000)
+  await clock.settle()
+  expect(stats()).toBe(missing + 6)
+  w.theme = undefined
+  await clock.advance(2_000)
+  await clock.settle()
   expect(await texts(ui)).not.toContain('"backgroundColor":"#')
+  await clock.advance(10_000)
+  await clock.settle()
+  expect(stats()).toBe(missing + 7)
   await ui.unmount()
+})
+
+test('two concurrent session starts leave one theme poll chain, not two', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const w: World = { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', theme: { toml: 'background = "#1e1e2e"\n', mtimeMs: 1 } }
+  const clock = world(on, w, ran)
+  await Promise.all([1, 2].map(() => $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })))
+  await clock.settle()
+  const before = ran.filter(a => a[0] === 'theme-stat').length
+  await clock.advance(10_000)
+  await clock.settle()
+  expect(ran.filter(a => a[0] === 'theme-stat').length - before).toBe(5)
 })
 
 test('formatSize: bytes, binary units, one decimal under 100, ? for unknown', async () => {
@@ -846,3 +883,290 @@ for (const os of ['linux', 'win32'] as const) {
     await ui.unmount()
   })
 }
+
+test('names cut in the middle keep their extension and never split a grapheme', async () => {
+  expect(middle('short.ts', 10)).toBe('short.ts')
+  const cut = middle('very-long-component-name.test.tsx', 16)
+  expect([...cut].length).toBe(16)
+  expect(cut.startsWith('very-long-')).toBe(true)
+  expect(cut.endsWith('…t.tsx')).toBe(true)
+  const family = '\u{1F469}\u200D\u{1F469}\u200D\u{1F467}'
+  expect(middle(family.repeat(6) + '.md', 6)).toBe(`${family}….md`)
+  expect(middle('é'.normalize('NFD').repeat(8), 5)).toBe(`${'é'.normalize('NFD').repeat(3)}…${'é'.normalize('NFD')}`)
+})
+
+test('dates are relative and at most 7 characters', async () => {
+  const now = new Date(2026, 9, 9, 15, 0).getTime()
+  const at = (...d: [number, number, number, number?, number?]) => stamp(new Date(...d).getTime(), now)
+  expect(at(2026, 9, 9, 14, 2)).toBe('14:02')
+  expect(at(2026, 9, 8, 23, 0)).toBe('1d')
+  expect(at(2026, 9, 6, 12, 0)).toBe('3d')
+  expect(at(2026, 8, 4, 12, 0)).toBe('5w')
+  expect(at(2025, 10, 3)).toBe('2025-11')
+  expect(stamp(0, now)).toBe('')
+  for (const s of [at(2026, 9, 9, 1, 0), at(2026, 9, 2), at(2026, 7, 20), at(2019, 0, 1)]) expect(s.length).toBeLessThanOrEqual(7)
+})
+
+test('palette follows the Claude Code theme; auto resolves the system appearance', async () => {
+  expect(isLight('light', 'dark')).toBe(true)
+  expect(isLight('light-daltonized', 'dark')).toBe(true)
+  expect(isLight('dark', 'light')).toBe(false)
+  expect(isLight('auto', 'light')).toBe(true)
+  expect(isLight('auto', 'dark')).toBe(false)
+  expect(isLight(undefined, 'light')).toBe(false)
+})
+
+for (const [theme, appearance, light] of [['auto', '', true], ['auto', 'Dark\n', false], ['light', 'Dark\n', true], ['dark', '', false]] as const) {
+  test(`theme ${theme} with macOS ${appearance ? 'dark' : 'light'} mode draws the ${light ? 'light' : 'dark'} palette; reads are marked r, reduced motion holds still`, { timeoutMs: 20_000 }, async ($, on) => {
+    const ran: Ran = []
+    const root = '/Users/k/proj'
+    const clock = world(on, { os: 'darwin', env: { HOME: '/Users/k', TMPDIR: '/tmp/' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file'], ['b.ts', 'file']] }, status: '', numstat: '', appearance }, ran)
+    on('config.list', () => ({ value: [
+      { key: 'theme', label: 'Theme', kind: 'choice', value: theme, provider: { plugin: 'engine', tier: 'core' }, isLocked: false },
+      { key: 'reduceMotion', label: 'Reduce motion', kind: 'boolean', value: true, provider: { plugin: 'engine', tier: 'core' }, isLocked: false },
+    ] }))
+    await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+    await clock.settle()
+    const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+    await $.tool.call({ tool: 'Read', file_path: `${root}/a.ts` } as any)
+    await clock.settle()
+    const shown = await texts(ui)
+    expect(shown).toContain(light ? '"activeBg":"#9ca3af","hoverBg":"#e7e8e7"' : '"activeBg":"#6b7280","hoverBg":"#343536"')
+    expect(shown).toContain(light ? '"#820bf4"' : '"#c186f9"')
+    expect(shown).toContain('"still":true')
+    expect(shown).toContain('{"t":" r","c":"' + (light ? '#820bf4' : '#c084fc') + '","b":true}')
+    expect(ran.some(a => a[0] === 'defaults')).toBe(theme === 'auto')
+    await ui.unmount()
+  })
+}
+
+test('size column: moving the cursor over sized folders starts no new du', { timeoutMs: 20_000, options: { column: 'size' } }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const dirs: World['dirs'] = { [root]: [] }
+  const du: Record<string, string> = {}
+  for (const d of ['a', 'b', 'c', 'd', 'e', 'f']) {
+    dirs[root]?.push([d, 'dir'])
+    dirs[`${root}/${d}`] = [['x.ts', 'file']]
+    du[`${root}/${d}`] = `4\t${root}/${d}\n`
+  }
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs, status: '', numstat: '', du }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  expect(await texts(ui)).toContain(' 4.0 K')
+  const before = ran.filter(a => a[0] === 'du').length
+  expect(before).toBe(6)
+  for (let i = 0; i < 10; i++) {
+    await ui.post({ key: i < 5 ? 'down' : 'up' }, { in: 'rows' })
+    await clock.settle()
+  }
+  expect(ran.filter(a => a[0] === 'du').length).toBe(before)
+  await ui.unmount()
+})
+
+test('theme auto follows a system appearance flip mid-session', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k/proj'
+  const w: World = { os: 'darwin', env: { HOME: '/Users/k', TMPDIR: '/tmp/' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', appearance: '' }
+  const clock = world(on, w, ran)
+  on('config.list', () => ({ value: [{ key: 'theme', label: 'Theme', kind: 'choice', value: 'auto', provider: { plugin: 'engine', tier: 'core' }, isLocked: false }] }))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  expect(await texts(ui)).toContain('"activeBg":"#9ca3af"')
+  w.appearance = 'Dark\n'
+  await clock.advance(60_000)
+  await clock.settle()
+  expect(await texts(ui)).toContain('"activeBg":"#6b7280"')
+  await ui.unmount()
+  const inline = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: { ...paneProps(60), placement: 'inline' } })
+  await clock.settle()
+  const probes = ran.filter(a => a[0] === 'defaults').length
+  await clock.advance(180_000)
+  await clock.settle()
+  expect(ran.filter(a => a[0] === 'defaults').length).toBe(probes)
+  await inline.unmount()
+})
+
+test('wide CJK and emoji names are cut by terminal cells and keep their extension', async () => {
+  for (const name of ['設定ファイル'.repeat(5) + '.json', '📁ノート'.repeat(6) + '.md', 'ab設定cd📁'.repeat(5) + '.tsx']) {
+    for (const cols of [12, 20, 31]) {
+      const cut = middle(name, cols)
+      expect(cells(cut)).toBeLessThanOrEqual(cols)
+      expect(cut.endsWith(name.slice(name.lastIndexOf('.')))).toBe(true)
+      expect(cut).toContain('…')
+    }
+  }
+  expect(cells('設定.json')).toBe(9)
+  expect(cells('📁a')).toBe(3)
+})
+
+test('size column: writes the scan cannot place re-size everything; a lockfile change re-sizes ignored folders, other writes do not', { timeoutMs: 20_000, options: { column: 'size' } }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const w: World = {
+    os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: root,
+    dirs: { [root]: [['node_modules', 'dir'], ['src', 'dir'], ['package-lock.json', 'file']], [`${root}/node_modules`]: [['x', 'dir']], [`${root}/src`]: [['a.ts', 'file']] },
+    status: '## main\0!! node_modules/\0', numstat: '', find: '',
+    du: { [`${root}/node_modules`]: `8\t${root}/node_modules\n`, [`${root}/src`]: `4\t${root}/src\n` },
+  }
+  const clock = world(on, w, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  const du = (dir: string) => ran.filter(a => a[0] === 'du' && a.at(-1) === `${root}/${dir}`).length
+  expect([du('node_modules'), du('src')]).toEqual([1, 1])
+  await $.tool.call({ tool: 'Bash', command: 'npm install' } as any)
+  await clock.settle()
+  expect([du('node_modules'), du('src')]).toEqual([2, 2])
+  w.find = `${root}/package-lock.json\0`
+  await $.tool.call({ tool: 'Bash', command: 'npm install' } as any)
+  await clock.settle()
+  expect([du('node_modules'), du('src')]).toEqual([3, 2])
+  w.find = `${root}/a.txt\0`
+  await $.tool.call({ tool: 'Bash', command: 'echo x > a.txt' } as any)
+  await clock.settle()
+  expect([du('node_modules'), du('src')]).toEqual([3, 2])
+  await ui.unmount()
+})
+
+test('auto-open: nothing at session start, the first write opens the pane, an open pane is never re-opened', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '' }, ran)
+  const start = opens.length
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  expect(opens.length).toBe(start)
+  await $.tool.call({ tool: 'Read', file_path: `${root}/a.txt` } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start)
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'a', new_string: 'b' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start + 1)
+  await $.tool.call({ tool: 'Write', file_path: `${root}/a.txt`, content: 'c' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start + 1)
+})
+
+test('auto-open: an inline pane is never opened by a write', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '' }, ran)
+  on('ui.close', () => ({ value: undefined }))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: { ...paneProps(60), placement: 'inline' } })
+  await clock.settle()
+  const start = opens.length
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'a', new_string: 'b' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start)
+  await ui.unmount()
+})
+
+test('auto-open on Windows outside a repo: a Bash write found by listing opens the pane', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = 'C:/Users/k/scratch'
+  const clock = world(on, { os: 'win32', env: { OS: 'Windows_NT', USERPROFILE: 'C:\\Users\\k' }, cwd: 'C:\\Users\\k\\scratch', top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '', mtimes: { 'a.txt': 1_800_000_000_500 } }, ran)
+  await $.session.start({ cwd: 'C:\\Users\\k\\scratch', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const start = opens.length
+  await $.tool.call({ tool: 'Bash', command: 'echo x > a.txt' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start + 1)
+})
+
+test('auto-open: activity reads never opens the pane on an edit', { timeoutMs: 20_000, options: { activity: 'reads' } }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '' }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const start = opens.length
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'a', new_string: 'b' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start)
+})
+
+test('auto-open: a pane that fails to open still shows the edit and is tried again on the next one', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '', openFails: true }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const start = opens.length
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'a', new_string: 'b' } as any)
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'b', new_string: 'c' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start + 2)
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  expect(await texts(ui)).toContain(shimmer('a.txt', 'orange'))
+  await ui.unmount()
+})
+
+test('auto-open: a pane the host leaves unplaced is not treated as open; each change asks again and no appearance poll starts', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '', unplaced: true }, ran)
+  on('config.list', () => ({ value: [{ key: 'theme', label: 'Theme', kind: 'choice', value: 'auto', provider: { plugin: 'engine', tier: 'core' }, isLocked: false }] }))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const start = opens.length
+  const probes = () => ran.filter(a => a[0] === 'gsettings').length
+  const before = probes()
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'a', new_string: 'b' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start + 1)
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'b', new_string: 'c' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start + 2)
+  await clock.advance(120_000)
+  await clock.settle()
+  expect(probes()).toBe(before)
+})
+
+test('auto-open: three concurrent edits open the pane once', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '' }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const start = opens.length
+  await Promise.all([1, 2, 3].map(i => $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'a', new_string: `b${i}` } as any)))
+  await clock.settle()
+  expect(opens.length).toBe(start + 1)
+})
+
+test('theme auto under WSL follows the Windows appearance through reg.exe', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k', WSL_DISTRO_NAME: 'Ubuntu' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', appearance: '    AppsUseLightTheme    REG_DWORD    0x1\n' }, ran)
+  on('config.list', () => ({ value: [{ key: 'theme', label: 'Theme', kind: 'choice', value: 'auto', provider: { plugin: 'engine', tier: 'core' }, isLocked: false }] }))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  expect(ran.some(a => a[0] === 'reg.exe')).toBe(true)
+  expect(await texts(ui)).toContain('"activeBg":"#9ca3af"')
+  await ui.unmount()
+})
+
+test('an Omarchy light theme leaves the palette to Claude Code; dim text takes dark_foreground, not the muted border tone', { timeoutMs: 20_000 }, async ($, on) => {
+  expect(parseTheme('muted = "#414868"\ndark_foreground = "#a9b1d6"\n').muted).toBe('#a9b1d6')
+  expect(parseTheme('muted = "#414868"\n').muted).toBe('#414868')
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', theme: { toml: 'mode = "light"\nbackground = "#fafafa"\n', mtimeMs: 1 } }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  expect(await texts(ui)).not.toContain('"backgroundColor":"#')
+  await ui.unmount()
+})

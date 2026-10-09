@@ -24,14 +24,27 @@ const ICON = {
   git: { nerd: '\u{e702}', plain: '±' },
 }
 
-export const TONES: Record<string, { bright: string[]; dim: string[]; solid: string }> = {
-  orange: { bright: ['#f97316', '#fb923c', '#fdba74', '#ffedd5'], dim: ['#8a4316', '#a3562a', '#bd7444', '#d29267'], solid: '#f97316' },
-  green: { bright: ['#22c55e', '#4ade80', '#86efac', '#dcfce7'], dim: ['#14532d', '#166534', '#2f7a47', '#4f9a66'], solid: '#4ade80' },
-  teal: { bright: ['#14b8a6', '#2dd4bf', '#5eead4', '#ccfbf1'], dim: ['#0f5e57', '#16786f', '#2a9488', '#4fb3a8'], solid: '#2dd4bf' },
-  blue: { bright: ['#3b82f6', '#60a5fa', '#93c5fd', '#dbeafe'], dim: ['#1e3a8a', '#1d4ed8', '#3b6fd1', '#6b93dc'], solid: '#60a5fa' },
-  purple: { bright: ['#a855f7', '#c084fc', '#d8b4fe', '#f3e8ff'], dim: ['#581c87', '#6b21a8', '#8b47c4', '#a874d6'], solid: '#c084fc' },
-  cyan: { bright: ['#06b6d4', '#22d3ee', '#67e8f9', '#cffafe'], dim: ['#155e75', '#0e7490', '#2b8ea3', '#5aa9b8'], solid: '#22d3ee' },
-  red: { bright: ['#ef4444', '#f87171', '#fca5a5', '#fee2e2'], dim: ['#7f1d1d', '#991b1b', '#b54040', '#c96a6a'], solid: '#f87171' },
+// Shimmer ramps, base to peak; every stop ≥4.5:1 on the host background and the hover row.
+// `dim` is the collapsed-ancestor ramp. Light ramps darken toward the peak instead of brightening.
+type Tone = { bright: string[]; dim: string[]; solid: string }
+export const TONES: Record<string, Tone> = {
+  orange: { bright: ['#f97c25', '#fb923c', '#fdba74', '#ffedd5'], dim: ['#cf9268', '#d6a37f', '#deb496', '#e5c4ae'], solid: '#f97920' },
+  green: { bright: ['#22c55e', '#4ade80', '#86efac', '#dcfce7'], dim: ['#4eb173', '#63ba84', '#78c495', '#8ecda5'], solid: '#4ade80' },
+  teal: { bright: ['#14b8a6', '#2dd4bf', '#5eead4', '#ccfbf1'], dim: ['#45b0a5', '#57bdb2', '#6dc6bc', '#83cec6'], solid: '#2dd4bf' },
+  blue: { bright: ['#69a0f8', '#7fb3fb', '#93c5fd', '#dbeafe'], dim: ['#81a0d5', '#98b1dd', '#afc3e4', '#c6d4ec'], solid: '#60a5fa' },
+  purple: { bright: ['#c186f9', '#cc9cfc', '#d8b4fe', '#f3e8ff'], dim: ['#b690da', '#c5a7e2', '#d4bee9', '#e3d5f1'], solid: '#c084fc' },
+  cyan: { bright: ['#06b6d4', '#22d3ee', '#67e8f9', '#cffafe'], dim: ['#3dadbf', '#53b8c8', '#6ac1cf', '#81cbd7'], solid: '#22d3ee' },
+  red: { bright: ['#f47a7a', '#f88f8f', '#fca5a5', '#fee2e2'], dim: ['#d58b8b', '#dda1a1', '#e5b8b8', '#edcece'], solid: '#f87575' },
+}
+
+export const LIGHT_TONES: Record<string, Tone> = {
+  orange: { bright: ['#ac4904', '#8e3c03', '#703003', '#522302'], dim: ['#915a34', '#7e4e2d', '#6b4327', '#593720'], solid: '#ac4904' },
+  green: { bright: ['#157538', '#105b2c', '#0c411f', '#072713'], dim: ['#37724d', '#2f6141', '#265036', '#1e3e2a'], solid: '#157538' },
+  teal: { bright: ['#0c7368', '#09574f', '#063c36', '#03201d'], dim: ['#30716a', '#285f59', '#214d48', '#193b38'], solid: '#0c7368' },
+  blue: { bright: ['#0a5de3', '#0951c6', '#0745a8', '#06398b'], dim: ['#3e67a7', '#375c94', '#305082', '#29456f'], solid: '#0a5de3' },
+  purple: { bright: ['#820bf4', '#720ad7', '#6308b9', '#53079c'], dim: ['#8145ba', '#743ea7', '#673795', '#5a3082'], solid: '#820bf4' },
+  cyan: { bright: ['#047183', '#035765', '#023e48', '#01242a'], dim: ['#2c707c', '#255f69', '#1f4e56', '#183d44'], solid: '#047183' },
+  red: { bright: ['#cc1111', '#b00f0f', '#940c0c', '#770a0a'], dim: ['#aa4646', '#983f3f', '#863737', '#743030'], solid: '#cc1111' },
 }
 
 const GIT_VERBS: Record<string, Omit<GitAction, 'kind'>> = {
