@@ -44,7 +44,7 @@ Installed it as `filetree@filetree` before the repository was renamed? Nothing t
 - Search the file tree, including folders you have not opened yet
 - Git status per file and folder in color, with exact lines changed (`+N` `-N`) on modified files and `?:N M:N D:N` file counts on folders
 - Branch, upstream and ahead/behind in the header
-- Visual indicator of Claude reads and searches (purple), writes (orange) and commits (green); collapsed folders open to show the file
+- Visual indicator of Claude reads and searches (purple), writes (orange) and commits (green); collapsed folders open to show the file. While a row shimmers its badge column also reads `r`, `w` or `●`, so the kind never depends on colour alone; with Claude Code's **Reduce motion** setting on, the row holds a steady colour instead of shimmering
 
   <img src="media/filetree-read.gif" alt="Files shimmer purple while Claude reads and searches them" width="800">
 
@@ -56,12 +56,13 @@ Installed it as `filetree@filetree` before the repository was renamed? Nothing t
 
   <img src="media/filetree-ask.gif" alt="Selecting config.yaml in the tree and asking Claude what it changed there" width="800">
 
+- The date column is relative: `14:02` today, `3d`, `5w`, then `2025-11`; long names are cut in the middle and keep their extension
 - File and folder sizes: the `Σ` header button swaps the date column for sizes; folders show their disk usage (`du`, or a summed listing on Windows), worked out in the background for the rows on screen and refreshed after Claude writes
 - Double-click a file to open it in its default app
 - Click to select, arrow keys to move through the tree
 - Light on large repos: outside a repo it only checks once whether one exists, and every git call is scoped to the cwd
 - Nerd Font icons with a plain Unicode fallback
-- On Omarchy, the pane takes its colors and background from the current theme and follows theme switches
+- Light and dark palettes follow Claude Code's `theme` setting (`auto` follows the system appearance); on Omarchy, the pane takes its colors and background from the current theme and follows theme switches
 
 ### Resizing the pane
 
