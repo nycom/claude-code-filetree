@@ -114,13 +114,10 @@ export function fileIcon(n: FileNode, open: boolean, isRepo: boolean): string {
   return cp(EXTS[ext] ?? 0xf0214)
 }
 
-export const GIT_COLOR: Record<string, string> = {
-  A: '#98c379',
-  '?': '#98c379',
-  R: '#61afef',
-  C: '#61afef',
-  M: '#e5c07b',
-  T: '#e5c07b',
+// Status letters, plus '+' and '-' for diff line counts; each ≥4.5:1 on its host background.
+export const GIT_COLOR: Record<'dark' | 'light', Record<string, string>> = {
+  dark: { A: '#98c379', '?': '#98c379', '+': '#98c379', R: '#61afef', C: '#61afef', M: '#e5c07b', T: '#e5c07b', '-': '#e48189' },
+  light: { A: '#2b753f', '?': '#2b753f', '+': '#2b753f', R: '#2d69aa', C: '#2d69aa', M: '#866100', T: '#866100', '-': '#b2394a' },
 }
 
 const PRIORITY = ['U', 'D', 'M', 'T', 'R', 'C', 'A', '?']

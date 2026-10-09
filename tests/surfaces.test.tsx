@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { ancestorsOf, formatSize, replaceChildren, toNodes } from '../hooks/tree'
+import { ancestorsOf, formatSize, isLight, middle, replaceChildren, stamp, toNodes } from '../hooks/tree'
 
 type World = {
   os: 'darwin' | 'linux' | 'win32'
@@ -20,6 +20,7 @@ type World = {
   du?: Record<string, string>
   duDelays?: number[]
   links?: string[]
+  appearance?: string
 }
 type Ran = string[][]
 const opens: unknown[] = []
@@ -85,6 +86,7 @@ function world(on: any, w: World, ran: Ran) {
       if (delay) await clock.sleep(delay)
       return ok(w.du?.[argv.at(-1) ?? ''] ?? '')
     }
+    if (argv[0] === 'defaults') return w.appearance ? ok(w.appearance) : { value: { exitCode: 1, stdout: '', stderr: 'does not exist', isStdoutTruncated: false, isStderrTruncated: false } }
     if (argv[0] === 'uname') return ok(w.os === 'darwin' ? 'Darwin\n' : 'Linux\n')
     if (argv[0] === 'sh') return ok('missing\n')
     if (argv[0] === 'git') {
@@ -114,7 +116,7 @@ async function texts(ui: any): Promise<string> {
   return JSON.stringify(await ui.drawn()) + rows
 }
 
-const STAMP = /\d{4}-\d{2}-\d{2} \d{2}:\d{2}/
+const STAMP = /" (\d{4}-\d{2}|\d{2}:\d{2}|\d+[dw])"/
 const NERD = /[\u{e000}-\u{f8ff}\u{f0000}-\u{fffff}]/u
 
 test('macOS Claude Code app: desktop pane draws, selects, opens with open', { timeoutMs: 20_000 }, async ($, on) => {
@@ -411,7 +413,7 @@ test('sidebar only: no pane in the default layout, and an inline pane closes its
   const closed: unknown[] = []
   on('ui.close', (_$: any, e: any) => {
     closed.push(e)
-    return {}
+    return { value: undefined }
   })
   await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
   await clock.settle()
@@ -843,6 +845,62 @@ for (const os of ['linux', 'win32'] as const) {
     await ui.post({ press: `${root}/dax.ts` }, { in: 'rows' })
     await clock.settle()
     expect(ran.some(a => a[0] === 'toast' && a[1]?.includes(`could not open ${root}/dax.ts`) && a[1]?.includes('exit 7'))).toBe(true)
+    await ui.unmount()
+  })
+}
+
+test('names cut in the middle keep their extension and never split a grapheme', async () => {
+  expect(middle('short.ts', 10)).toBe('short.ts')
+  const cut = middle('very-long-component-name.test.tsx', 16)
+  expect([...cut].length).toBe(16)
+  expect(cut.startsWith('very-long-')).toBe(true)
+  expect(cut.endsWith('…t.tsx')).toBe(true)
+  const family = '\u{1F469}\u200D\u{1F469}\u200D\u{1F467}'
+  expect(middle(family.repeat(6) + '.md', 6)).toBe(`${family.repeat(2)}….md`)
+  expect(middle('é'.normalize('NFD').repeat(8), 5)).toBe(`${'é'.normalize('NFD').repeat(3)}…${'é'.normalize('NFD')}`)
+})
+
+test('dates are relative and at most 7 characters', async () => {
+  const now = new Date(2026, 9, 9, 15, 0).getTime()
+  const at = (...d: [number, number, number, number?, number?]) => stamp(new Date(...d).getTime(), now)
+  expect(at(2026, 9, 9, 14, 2)).toBe('14:02')
+  expect(at(2026, 9, 8, 23, 0)).toBe('1d')
+  expect(at(2026, 9, 6, 12, 0)).toBe('3d')
+  expect(at(2026, 8, 4, 12, 0)).toBe('5w')
+  expect(at(2025, 10, 3)).toBe('2025-11')
+  expect(stamp(0, now)).toBe('')
+  for (const s of [at(2026, 9, 9, 1, 0), at(2026, 9, 2), at(2026, 7, 20), at(2019, 0, 1)]) expect(s.length).toBeLessThanOrEqual(7)
+})
+
+test('palette follows the Claude Code theme; auto resolves the system appearance', async () => {
+  expect(isLight('light', 'dark')).toBe(true)
+  expect(isLight('light-daltonized', 'dark')).toBe(true)
+  expect(isLight('dark', 'light')).toBe(false)
+  expect(isLight('auto', 'light')).toBe(true)
+  expect(isLight('auto', 'dark')).toBe(false)
+  expect(isLight(undefined, 'light')).toBe(false)
+})
+
+for (const [theme, appearance, light] of [['auto', '', true], ['auto', 'Dark\n', false], ['light', 'Dark\n', true], ['dark', '', false]] as const) {
+  test(`theme ${theme} with macOS ${appearance ? 'dark' : 'light'} mode draws the ${light ? 'light' : 'dark'} palette; reads are marked r, reduced motion holds still`, { timeoutMs: 20_000 }, async ($, on) => {
+    const ran: Ran = []
+    const root = '/Users/k/proj'
+    const clock = world(on, { os: 'darwin', env: { HOME: '/Users/k', TMPDIR: '/tmp/' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file'], ['b.ts', 'file']] }, status: '', numstat: '', appearance }, ran)
+    on('config.list', () => ({ value: [
+      { key: 'theme', label: 'Theme', kind: 'choice', value: theme, provider: { plugin: 'engine', tier: 'core' }, isLocked: false },
+      { key: 'reduceMotion', label: 'Reduce motion', kind: 'boolean', value: true, provider: { plugin: 'engine', tier: 'core' }, isLocked: false },
+    ] }))
+    await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+    await clock.settle()
+    const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+    await $.tool.call({ tool: 'Read', file_path: `${root}/a.ts` } as any)
+    await clock.settle()
+    const shown = await texts(ui)
+    expect(shown).toContain(light ? '"activeBg":"#9ca3af","hoverBg":"#e7e8e7"' : '"activeBg":"#6b7280","hoverBg":"#343536"')
+    expect(shown).toContain(light ? '"#820bf4"' : '"#c186f9"')
+    expect(shown).toContain('"still":true')
+    expect(shown).toContain('{"t":" r","c":"' + (light ? '#820bf4' : '#c084fc') + '","b":true}')
+    expect(ran.some(a => a[0] === 'defaults')).toBe(theme === 'auto')
     await ui.unmount()
   })
 }
