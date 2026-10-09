@@ -1170,3 +1170,74 @@ test('an Omarchy light theme leaves the palette to Claude Code; dim text takes d
   expect(await texts(ui)).not.toContain('"backgroundColor":"#')
   await ui.unmount()
 })
+
+// Stands in for the skins mod: `/skin <json>` publishes its resolved theme as skins does.
+const skins = {
+  name: 'skins',
+  register(on: any) {
+    on('command.run', { command: 'skin' }, async ($: any, e: any) => {
+      await $.state.set({ plugin: 'skins', key: 'theme' }, JSON.parse(e.args))
+      return { text: '' }
+    })
+  },
+}
+const skin = (theme: unknown) => ({ command: 'skin', args: JSON.stringify(theme), origin: { kind: 'person' }, presentation: { isFullscreen: true, columns: 200 } }) as any
+const DRACULA = { mode: 'dark', accent: '#ff79c6', foreground: '#f8f8f2', dim: '#bd93f9', muted: '#6272a4', red: '#ff5555', selection: '#44475a', background: '#282a36' }
+const NORD = { mode: 'dark', accent: '#88c0d0', foreground: '#eceff4', dim: '#d8dee9', muted: '#4c566a', red: '#bf616a', selection: '#434c5e', background: '#2e3440' }
+const OMARCHY = 'accent = "#7aa2f7"\nforeground = "#c0caf5"\nselection = "#33467c"\nbackground = "#1a1b26"\n'
+
+test('the skin chosen in the skins mod colours the pane over the Omarchy theme and redraws it on /skin', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', theme: { toml: OMARCHY, mtimeMs: 1 } }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await $.command.run(skin(DRACULA))
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  let shown = await texts(ui)
+  for (const c of ['"backgroundColor":"#282a36"', '"activeBg":"#44475a"', '"fg":"#f8f8f2"', '#ff79c6', '#bd93f9']) expect(shown).toContain(c)
+  for (const c of ['#1a1b26', '#33467c', '#c0caf5', '#7aa2f7']) expect(shown).not.toContain(c)
+  await $.command.run(skin(NORD))
+  await clock.settle()
+  shown = await texts(ui)
+  for (const c of ['"backgroundColor":"#2e3440"', '"activeBg":"#434c5e"', '"fg":"#eceff4"', '#88c0d0', '#d8dee9']) expect(shown).toContain(c)
+  for (const c of ['#282a36', '#44475a', '#f8f8f2', '#ff79c6']) expect(shown).not.toContain(c)
+  await ui.unmount()
+})
+
+test('with skins off, or on a light skin, the pane keeps the Omarchy theme', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', theme: { toml: OMARCHY, mtimeMs: 1 } }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await $.command.run(skin(DRACULA))
+  await $.command.run(skin(null))
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  const omarchy = ['"backgroundColor":"#1a1b26"', '"activeBg":"#33467c"', '"fg":"#c0caf5"', '#7aa2f7']
+  let shown = await texts(ui)
+  for (const c of omarchy) expect(shown).toContain(c)
+  expect(shown).not.toContain('#282a36')
+  await $.command.run(skin({ ...DRACULA, mode: 'light', background: '#faf9f5' }))
+  await clock.settle()
+  shown = await texts(ui)
+  for (const c of omarchy) expect(shown).toContain(c)
+  expect(shown).not.toContain('#faf9f5')
+  await ui.unmount()
+})
+
+test('without the skins mod installed the pane draws the Omarchy theme', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', theme: { toml: OMARCHY, mtimeMs: 1 } }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  const shown = await texts(ui)
+  for (const c of ['"backgroundColor":"#1a1b26"', '"activeBg":"#33467c"', '"fg":"#c0caf5"', '#7aa2f7']) expect(shown).toContain(c)
+  expect(ran.some(a => a[0] === 'toast')).toBe(false)
+  await ui.unmount()
+})

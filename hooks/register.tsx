@@ -37,6 +37,7 @@ import {
 
 const TREE = { plugin: 'filetree', key: 'tree' } as const
 const THEME = { plugin: 'filetree', key: 'theme' } as const
+const SKIN_THEME = { plugin: 'skins', key: 'theme' } as const
 const ACTIVITY = { plugin: 'filetree', key: 'activity' } as const
 const PANE = 'filetree'
 const BRANCH_ROW = '#branch'
@@ -1346,7 +1347,10 @@ export const register: Register = (on, options) => {
     const mode = light ? 'light' : 'dark'
     // Read even when unused, so a theme that turns up later redraws the pane.
     const saved = (await $.state.get(THEME)).value
-    const theme: Theme = (omarchy && saved) || (light ? LIGHT_THEME : DEFAULT_THEME)
+    // The skin the skins mod draws the chat in wins over Omarchy; a light one, like a light Omarchy theme, is left out.
+    const skin = (await $.state.get(SKIN_THEME)).value
+    const skinned: Theme | null = skin?.mode === 'dark' ? { fg: skin.foreground, accent: skin.accent, muted: skin.dim || skin.muted, urgent: skin.red, selection: skin.selection, bg: skin.background } : null
+    const theme: Theme = skinned ?? ((omarchy && saved) || (light ? LIGHT_THEME : DEFAULT_THEME))
     const tones = light ? LIGHT_TONES : TONES
     const gitc = GIT_COLOR[mode]
     const now = await $.clock.now()

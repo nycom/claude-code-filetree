@@ -62,8 +62,15 @@ export type Theme = {
   bg: string
 }
 
+// What the skins mod publishes as its resolved theme; null while its skin is off. Declared
+// here rather than as a dependency so the pane still loads without skins.
+export type PanelTheme = { mode: 'dark' | 'light'; accent: string; foreground: string; dim: string; muted: string; red: string; selection: string; background: string }
+
 declare module 'claude-code' {
   interface PluginState {
+    skins: {
+      theme: PanelTheme | null
+    }
     filetree: {
       tree: FileTree
       theme: Theme
