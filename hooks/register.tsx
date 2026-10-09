@@ -100,6 +100,7 @@ let view = { from: 0, max: 0 }
 let paneRoom = 0
 let sizeTick = false
 let light = false
+let skinOn = false
 let still = false
 const marks = new Map<string, string>()
 let lastSync = 0
@@ -171,9 +172,11 @@ async function readPrefs($: EngineInterface): Promise<void> {
   const was = { light, still }
   autoTheme = false
   try {
+    // A skin on in the skins mod says light or dark itself, so the OS is not asked.
+    skinOn = Boolean((await $.state.get(SKIN_THEME)).value)
     const rows = await $.config.list()
     const theme = rows.find(r => r.key === 'theme')?.value
-    autoTheme = theme === 'auto'
+    autoTheme = theme === 'auto' && !skinOn
     light = isLight(theme, autoTheme ? await appearance($) : 'dark')
     still = rows.find(r => r.key === 'reduceMotion')?.value === true
   } catch {
@@ -1344,14 +1347,16 @@ export const register: Register = (on, options) => {
     const unicode = glyphSetting === 'plain' || (glyphSetting === 'auto' && (noNerd || e.surface === 'desktop'))
     const { Box, Text, Button, Input, Client } = $.ui.resolve(e)
     const t = await get($)
-    const mode = light ? 'light' : 'dark'
+    // A skin on in the skins mod decides light or dark; turning it on or off starts or stops the appearance poll.
+    const skin = (await $.state.get(SKIN_THEME)).value
+    if (Boolean(skin) !== skinOn) void readPrefs($)
+    const mode = skin?.mode ?? (light ? 'light' : 'dark')
     // Read even when unused, so a theme that turns up later redraws the pane.
     const saved = (await $.state.get(THEME)).value
     // The skin the skins mod draws the chat in wins over Omarchy; a light one, like a light Omarchy theme, is left out.
-    const skin = (await $.state.get(SKIN_THEME)).value
-    const skinned: Theme | null = skin?.mode === 'dark' ? { fg: skin.foreground, accent: skin.accent, muted: skin.dim || skin.muted, urgent: skin.red, selection: skin.selection, bg: skin.background } : null
-    const theme: Theme = skinned ?? ((omarchy && saved) || (light ? LIGHT_THEME : DEFAULT_THEME))
-    const tones = light ? LIGHT_TONES : TONES
+    const skinned: Theme | null = skin?.mode === 'dark' ? { fg: skin.foreground, accent: skin.accent, muted: skin.dim, urgent: skin.red, selection: skin.selection, bg: skin.background } : null
+    const theme: Theme = skinned ?? ((omarchy && saved) || (mode === 'light' ? LIGHT_THEME : DEFAULT_THEME))
+    const tones = mode === 'light' ? LIGHT_TONES : TONES
     const gitc = GIT_COLOR[mode]
     const now = await $.clock.now()
     const live = (await activities($)).filter(a => now - a.at < (a.state === 'running' ? RUNNING_MAX_MS : ACTIVITY_TTL_MS))

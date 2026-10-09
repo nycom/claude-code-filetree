@@ -1182,8 +1182,8 @@ const skins = {
   },
 }
 const skin = (theme: unknown) => ({ command: 'skin', args: JSON.stringify(theme), origin: { kind: 'person' }, presentation: { isFullscreen: true, columns: 200 } }) as any
-const DRACULA = { mode: 'dark', accent: '#ff79c6', foreground: '#f8f8f2', dim: '#bd93f9', muted: '#6272a4', red: '#ff5555', selection: '#44475a', background: '#282a36' }
-const NORD = { mode: 'dark', accent: '#88c0d0', foreground: '#eceff4', dim: '#d8dee9', muted: '#4c566a', red: '#bf616a', selection: '#434c5e', background: '#2e3440' }
+const DRACULA = { mode: 'dark', accent: '#ff79c6', foreground: '#f8f8f2', dim: '#bd93f9', red: '#ff5555', selection: '#44475a', background: '#282a36' }
+const NORD = { mode: 'dark', accent: '#88c0d0', foreground: '#eceff4', dim: '#d8dee9', red: '#bf616a', selection: '#434c5e', background: '#2e3440' }
 const OMARCHY = 'accent = "#7aa2f7"\nforeground = "#c0caf5"\nselection = "#33467c"\nbackground = "#1a1b26"\n'
 
 test('the skin chosen in the skins mod colours the pane over the Omarchy theme and redraws it on /skin', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
@@ -1239,5 +1239,60 @@ test('without the skins mod installed the pane draws the Omarchy theme', { timeo
   const shown = await texts(ui)
   for (const c of ['"backgroundColor":"#1a1b26"', '"activeBg":"#33467c"', '"fg":"#c0caf5"', '#7aa2f7']) expect(shown).toContain(c)
   expect(ran.some(a => a[0] === 'toast')).toBe(false)
+  await ui.unmount()
+})
+
+const themeSetting = (value: string) => ({ value: [{ key: 'theme', label: 'Theme', kind: 'choice', value, provider: { plugin: 'engine', tier: 'core' }, isLocked: false }] })
+
+for (const [claude, mode] of [['light', 'dark'], ['dark', 'light']] as const) {
+  test(`a ${mode} skin under Claude Code's ${claude} theme draws ${mode} tones and git colours`, { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+    const ran: Ran = []
+    const root = '/home/k/proj'
+    const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: root, dirs: { [root]: [['a.ts', 'file'], ['b.ts', 'file']] }, status: '## main\0 M a.ts\0?? b.ts\0', numstat: '' }, ran)
+    on('config.list', () => themeSetting(claude))
+    await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+    await $.command.run(skin({ ...DRACULA, mode }))
+    await clock.settle()
+    const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+    await clock.settle()
+    const shown = await texts(ui)
+    const dark = ['"#c186f9"', '"#e5c07b"', '"#98c379"']
+    const light = ['"#820bf4"', '"#866100"', '"#2b753f"']
+    for (const c of mode === 'dark' ? dark : [...light, '"activeBg":"#9ca3af"']) expect(shown).toContain(c)
+    for (const c of mode === 'dark' ? light : dark) expect(shown).not.toContain(c)
+    await ui.unmount()
+  })
+}
+
+test('theme auto with a skin on asks the OS nothing; with the skin off the appearance poll is back', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k/proj'
+  const clock = world(on, { os: 'darwin', env: { HOME: '/Users/k', TMPDIR: '/tmp/' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', appearance: '' }, ran)
+  on('config.list', () => themeSetting('auto'))
+  const probes = () => ran.filter(a => a[0] === 'defaults').length
+  await $.command.run(skin(DRACULA))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  await clock.advance(180_000)
+  await clock.settle()
+  expect(await texts(ui)).toContain('"activeBg":"#44475a"')
+  expect(probes()).toBe(0)
+  await $.command.run(skin(null))
+  await clock.settle()
+  expect(await texts(ui)).toContain('"activeBg":"#9ca3af"')
+  const off = probes()
+  expect(off).toBeGreaterThan(0)
+  await clock.advance(60_000)
+  await clock.settle()
+  expect(probes()).toBeGreaterThan(off)
+  await $.command.run(skin(NORD))
+  await clock.settle()
+  const on2 = probes()
+  await clock.advance(180_000)
+  await clock.settle()
+  expect(probes()).toBe(on2)
+  expect(await texts(ui)).toContain('"activeBg":"#434c5e"')
   await ui.unmount()
 })
