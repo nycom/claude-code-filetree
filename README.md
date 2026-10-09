@@ -64,7 +64,9 @@ Installed it as `filetree@filetree` before the repository was renamed? Nothing t
 - Click to select, arrow keys to move through the tree
 - Light on large repos: outside a repo it only checks once whether one exists, and every git call is scoped to the cwd
 - Nerd Font icons with a plain Unicode fallback
-- Light and dark palettes follow Claude Code's `theme` setting. `auto` is resolved from the OS appearance (Windows' under WSL) and re-checked every 60 seconds while the pane is open. On Omarchy, the pane takes its colors and background from the current dark theme and follows theme switches; a light Omarchy theme leaves the palette to Claude Code's setting
+- Opens by itself on the first real file change: nothing opens at session start, and the first write (Edit or Write, when **Claude activity** includes writes) or any file change found after a Bash call opens the pane. An open pane is never re-opened. A pane that fails to open, or that the host leaves unplaced (for example, too narrow), is tried again on the next change, and an inline pane is never auto-opened
+- Light and dark palettes follow Claude Code's `theme` setting. `auto` follows the OS appearance (macOS, Windows, GNOME; under WSL, Windows' through `reg.exe`) and is re-checked every 60 seconds while the pane is open
+- Omarchy theming: the pane takes its colors and background from `~/.local/state/omarchy/current/theme/colors.toml` (`foreground`, `accent`, `red`, `selection`, `background`, with `color7`, `color4`, `color1` as fallbacks; muted text is `dark_foreground`, else `muted`, else `color8`). The file is checked every 2 seconds while it exists and every 60 seconds while it is missing, so a theme switch or a theme set up later is picked up. A theme with `mode = "light"` leaves the palette to Claude Code's setting
 
 ### Resizing the pane
 
