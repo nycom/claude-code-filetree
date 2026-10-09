@@ -44,7 +44,7 @@ Installed it as `filetree@filetree` before the repository was renamed? Nothing t
 - Search the file tree, including folders you have not opened yet
 - Git status per file and folder in color, with exact lines changed (`+N` `-N`) on modified files and `?:N M:N D:N` file counts on folders
 - Branch, upstream and ahead/behind in the header
-- Visual indicator of Claude reads and searches (purple), writes (orange) and commits (green); collapsed folders open to show the file. While a row shimmers its badge column also reads `r`, `w` or `●`, so the kind never depends on colour alone; with Claude Code's **Reduce motion** setting on, the row holds a steady colour instead of shimmering
+- Visual indicator of Claude reads and searches (purple), writes (orange) and commits (green); collapsed folders open to show the file. While a row shimmers its badge column also reads `r`, `w` or `●` (folders showing git counts keep the counts), so the kind never depends on colour alone. Every shimmer step keeps at least 4.5:1 contrast on the background in both themes; with Claude Code's **Reduce motion** setting on, the row holds a static colour instead of shimmering
 
   <img src="media/filetree-read.gif" alt="Files shimmer purple while Claude reads and searches them" width="800">
 
@@ -56,13 +56,15 @@ Installed it as `filetree@filetree` before the repository was renamed? Nothing t
 
   <img src="media/filetree-ask.gif" alt="Selecting config.yaml in the tree and asking Claude what it changed there" width="800">
 
-- The date column is relative: `14:02` today, `3d`, `5w`, then `2025-11`; long names are cut in the middle and keep their extension
-- File and folder sizes: the `Σ` header button swaps the date column for sizes; folders show their disk usage (`du`, or a summed listing on Windows), worked out in the background for the rows on screen and refreshed after Claude writes
+- The date column is relative: `14:02` today, `3d`, `5w`, then `2025-11`
+- Long names are cut in the middle by terminal cells, so CJK and emoji line up, and keep their extension (`very-lo…e.test.ts`)
+- The row under the cursor is drawn in your foreground colour, and hovering blends the selection colour toward the background rather than painting over it
+- File and folder sizes: the `Σ` header button swaps the date column for sizes; folders show their disk usage (`du`, or a summed listing on Windows), worked out in the background for the rows on screen. After a Bash call that writes, only the folders above the changed files are re-sized; ignored folders such as `node_modules` are re-sized only when a lockfile changed. If the scan finds no changed file, or hits its depth cap (`find` goes 6 levels deep, 4 outside a repo), every folder is re-sized
 - Double-click a file to open it in its default app
 - Click to select, arrow keys to move through the tree
 - Light on large repos: outside a repo it only checks once whether one exists, and every git call is scoped to the cwd
 - Nerd Font icons with a plain Unicode fallback
-- Light and dark palettes follow Claude Code's `theme` setting (`auto` follows the system appearance); on Omarchy, the pane takes its colors and background from the current theme and follows theme switches
+- Light and dark palettes follow Claude Code's `theme` setting. `auto` is resolved from the OS appearance and re-checked every 60 seconds while the pane is open. On Omarchy, the pane takes its colors and background from the current theme and follows theme switches
 
 ### Resizing the pane
 
