@@ -998,3 +998,22 @@ test('size column: writes the scan cannot place re-size everything; a lockfile c
   expect([du('node_modules'), du('src')]).toEqual([3, 2])
   await ui.unmount()
 })
+
+test('auto-open: nothing at session start, the first write opens the pane, an open pane is never re-opened', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '' }, ran)
+  const start = opens.length
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  expect(opens.length).toBe(start)
+  await $.tool.call({ tool: 'Read', file_path: `${root}/a.txt` } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start)
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'a', new_string: 'b' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start + 1)
+  await $.tool.call({ tool: 'Write', file_path: `${root}/a.txt`, content: 'c' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start + 1)
+})

@@ -343,14 +343,23 @@ async function reset($: EngineInterface, root: string, focus = false): Promise<v
   sizeEpoch += 1
   sizeQueue = []
   await put($, () => ({ ...emptyTree(root), showHidden: prev.showHidden, showSize: prev.root ? prev.showSize : sizeDefault }))
-  const title = `Files: ${root.split('/').pop() || root}`
-  if (focus || !noDock) {
-    await $.ui.open({ id: PANE, title, ...(focus ? { focus: true } : {}) })
+  // Only /filetree opens a closed pane here; an open one just takes the new root's title.
+  if (focus || (paneOpen && !noDock)) {
+    await $.ui.open({ id: PANE, title: titleOf(root), ...(focus ? { focus: true } : {}) })
     paneShown($, true)
   }
   await loadDirs($, [root])
   await detectRepo($)
   await refreshGit($)
+}
+
+const titleOf = (root: string) => `Files: ${root.split('/').pop() || root}`
+
+// Auto-open: only on a real file change, and never re-open a pane that is already showing.
+async function showOnChange($: EngineInterface): Promise<void> {
+  if (paneOpen || noDock) return
+  await $.ui.open({ id: PANE, title: titleOf((await get($)).root) })
+  paneShown($, true)
 }
 
 async function revealPaths($: EngineInterface, paths: string[]): Promise<void> {
@@ -812,6 +821,7 @@ async function afterBash($: EngineInterface, jobs: Job[]): Promise<void> {
     const blind = installed ? Object.keys(fresh.dirSizes).filter(d => underAny(d, ignored, t.root) || relative(t.root, d).split('/').some(s => PRUNE.includes(s))) : []
     await staleSizes($, capped || found.hits.length + found.gone.length === 0 ? undefined : [...found.hits, ...found.gone, ...blind])
     const hits = found.hits.filter(x => inside(t.root, x) && !underAny(x, ignored, t.root)).slice(0, FIND_LIMIT)
+    if (hits.length || found.gone.length) await showOnChange($)
     await revealPaths($, hits)
     const loaded = await get($)
     const dirs = [...new Set([loaded.root, ...openDirs(loaded), ...hits.map(dirname), ...found.gone.map(dirname)])].filter(d => inside(loaded.root, d))
@@ -886,6 +896,7 @@ async function touched($: EngineInterface, paths: string[], tone: string, show: 
   const within = paths.map(posix).filter(p => inside(t.root, p))
   if (within.length === 0) return
   if (tone !== 'purple') {
+    await showOnChange($)
     searchIndex = null
     await staleSizes($, within)
     await revealPaths($, within.map(dirname))
@@ -1091,10 +1102,6 @@ export const register: Register = (on, options) => {
       await setActivities($, cur => cur.map(a => (a.state === 'running' ? { ...a, state: 'failed', label: `${a.kind} interrupted` } : a)))
       const cwd = await cwdOf($)
       if (!t.root || t.nodes.length === 0 || (follow && t.root !== cwd)) await reset($, cwd)
-      else if (!noDock) {
-        await $.ui.open({ id: PANE, title: `Files: ${t.root.split('/').pop() || t.root}` })
-        paneShown($, true)
-      }
     })()
     return next(e)
   })
@@ -1313,6 +1320,8 @@ export const register: Register = (on, options) => {
       const { Box: Empty } = $.ui.resolve(e)
       return <Empty />
     }
+    // A pane the host restored is open too, so showOnChange must not open it again.
+    if (!paneOpen) paneShown($, true)
     const unicode = glyphSetting === 'plain' || (glyphSetting === 'auto' && (noNerd || e.surface === 'desktop'))
     const { Box, Text, Button, Input, Client } = $.ui.resolve(e)
     const t = await get($)
