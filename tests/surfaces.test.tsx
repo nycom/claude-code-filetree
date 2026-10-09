@@ -904,3 +904,47 @@ for (const [theme, appearance, light] of [['auto', '', true], ['auto', 'Dark\n',
     await ui.unmount()
   })
 }
+
+test('size column: moving the cursor over sized folders starts no new du', { timeoutMs: 20_000, options: { column: 'size' } }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const dirs: World['dirs'] = { [root]: [] }
+  const du: Record<string, string> = {}
+  for (const d of ['a', 'b', 'c', 'd', 'e', 'f']) {
+    dirs[root]?.push([d, 'dir'])
+    dirs[`${root}/${d}`] = [['x.ts', 'file']]
+    du[`${root}/${d}`] = `4\t${root}/${d}\n`
+  }
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs, status: '', numstat: '', du }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  expect(await texts(ui)).toContain(' 4.0 K')
+  const before = ran.filter(a => a[0] === 'du').length
+  expect(before).toBe(6)
+  for (let i = 0; i < 10; i++) {
+    await ui.post({ key: i < 5 ? 'down' : 'up' }, { in: 'rows' })
+    await clock.settle()
+  }
+  expect(ran.filter(a => a[0] === 'du').length).toBe(before)
+  await ui.unmount()
+})
+
+test('theme auto follows a system appearance flip mid-session', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k/proj'
+  const w: World = { os: 'darwin', env: { HOME: '/Users/k', TMPDIR: '/tmp/' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', appearance: '' }
+  const clock = world(on, w, ran)
+  on('config.list', () => ({ value: [{ key: 'theme', label: 'Theme', kind: 'choice', value: 'auto', provider: { plugin: 'engine', tier: 'core' }, isLocked: false }] }))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  expect(await texts(ui)).toContain('"activeBg":"#9ca3af"')
+  w.appearance = 'Dark\n'
+  await clock.advance(60_000)
+  await clock.settle()
+  expect(await texts(ui)).toContain('"activeBg":"#6b7280"')
+  await ui.unmount()
+})

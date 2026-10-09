@@ -55,6 +55,7 @@ const SCAN_DEPTH = 6
 const MARK: Record<string, string> = { read: 'r', write: 'w', commit: '●' }
 const THEME_FILE = '.local/state/omarchy/current/theme/colors.toml'
 const THEME_POLL_MS = 2000
+const APPEARANCE_POLL_MS = 60_000
 const FONT_SCRIPT =
   'if command -v fc-list >/dev/null 2>&1; then f=$(fc-list ":charset=$1" file | head -n1 | cut -d: -f1); ' +
   'else f=$(ls "$HOME"/Library/Fonts/*Nerd* /Library/Fonts/*Nerd* 2>/dev/null | head -n1); fi; ' +
@@ -71,6 +72,7 @@ const SIZE_WALK_LIMIT = 50_000
 
 let blink: Timer | null = null
 let themePoll: Timer | null = null
+let appearancePoll: Timer | null = null
 let themeMtime: number | null = null
 let generation = 0
 let lastPress = { key: '', at: 0 }
@@ -159,14 +161,24 @@ async function appearance($: EngineInterface): Promise<'light' | 'dark'> {
 }
 
 async function readPrefs($: EngineInterface): Promise<void> {
+  const was = { light, still }
+  let auto = false
   try {
     const rows = await $.config.list()
     const theme = rows.find(r => r.key === 'theme')?.value
-    light = isLight(theme, theme === 'auto' ? await appearance($) : 'dark')
+    auto = theme === 'auto'
+    light = isLight(theme, auto ? await appearance($) : 'dark')
     still = rows.find(r => r.key === 'reduceMotion')?.value === true
   } catch {
     light = false
   }
+  // ponytail: under theme auto a system appearance flip shows within 60s; a host appearance event would make it instant.
+  if (auto && !appearancePoll) appearancePoll = $.clock.every(APPEARANCE_POLL_MS, () => void readPrefs($))
+  else if (!auto && appearancePoll) {
+    appearancePoll.cancel()
+    appearancePoll = null
+  }
+  if (light !== was.light || still !== was.still) $.ui.invalidate('ui.render')
 }
 
 async function get($: EngineInterface): Promise<FileTree> {
@@ -1069,7 +1081,6 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     if (result.deny === undefined && (e.key === 'theme' || e.key === 'reduceMotion')) {
       await readPrefs($)
-      $.ui.invalidate('ui.render')
     }
     return result
   })
