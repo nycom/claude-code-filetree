@@ -72,6 +72,7 @@ const SIZE_WALK_LIMIT = 50_000
 
 let blink: Timer | null = null
 let themePoll: Timer | null = null
+let themeEpoch = 0
 let appearancePoll: Timer | null = null
 let autoTheme = false
 let paneOpen = false
@@ -1082,9 +1083,13 @@ async function loadTheme($: EngineInterface): Promise<boolean> {
 }
 
 // A present theme is polled every 2s to follow switches; a missing one every minute, so one set up later is still picked up.
-async function watchTheme($: EngineInterface): Promise<void> {
+// Each fresh call takes a new epoch and cancels the old timer synchronously; a chain still awaiting a stat when superseded stops itself.
+async function watchTheme($: EngineInterface, mine = ++themeEpoch): Promise<void> {
+  if (mine !== themeEpoch) return
+  themePoll?.cancel()
   const found = await loadTheme($)
-  themePoll = $.clock.after(found ? THEME_POLL_MS : THEME_MISSING_POLL_MS, () => void watchTheme($))
+  if (mine !== themeEpoch) return
+  themePoll = $.clock.after(found ? THEME_POLL_MS : THEME_MISSING_POLL_MS, () => void watchTheme($, mine))
 }
 
 function shortPath(path: string): string {
@@ -1113,7 +1118,6 @@ export const register: Register = (on, options) => {
         noNerd = true
       }
       await readPrefs($)
-      themePoll?.cancel()
       themePath = `${home}/${THEME_FILE}`
       await watchTheme($)
       const t = await get($)

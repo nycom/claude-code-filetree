@@ -23,6 +23,7 @@ type World = {
   appearance?: string
   mtimes?: Record<string, number>
   openFails?: boolean
+  unplaced?: boolean
 }
 type Ran = string[][]
 const opens: unknown[] = []
@@ -39,7 +40,7 @@ function world(on: any, w: World, ran: Ran) {
   on('ui.open', (_$: any, e: any) => {
     opens.push(e)
     if (w.openFails) throw new Error('no room for the pane')
-    return { value: { isPlaced: true } }
+    return { value: { isPlaced: !w.unplaced } }
   })
   on('ui.toast', (_$: any, e: any) => {
     ran.push(['toast', String(e.text ?? e.message ?? JSON.stringify(e))])
@@ -748,6 +749,19 @@ test('without an Omarchy theme the pane keeps the terminal background; a missing
   await ui.unmount()
 })
 
+test('two concurrent session starts leave one theme poll chain, not two', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const w: World = { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', theme: { toml: 'background = "#1e1e2e"\n', mtimeMs: 1 } }
+  const clock = world(on, w, ran)
+  await Promise.all([1, 2].map(() => $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })))
+  await clock.settle()
+  const before = ran.filter(a => a[0] === 'theme-stat').length
+  await clock.advance(10_000)
+  await clock.settle()
+  expect(ran.filter(a => a[0] === 'theme-stat').length - before).toBe(5)
+})
+
 test('formatSize: bytes, binary units, one decimal under 100, ? for unknown', async () => {
   expect(formatSize(0)).toBe('0 B')
   expect(formatSize(1023)).toBe('1023 B')
@@ -1094,6 +1108,39 @@ test('auto-open: a pane that fails to open still shows the edit and is tried aga
   const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
   expect(await texts(ui)).toContain(shimmer('a.txt', 'orange'))
   await ui.unmount()
+})
+
+test('auto-open: a pane the host leaves unplaced is not treated as open; each change asks again and no appearance poll starts', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '', unplaced: true }, ran)
+  on('config.list', () => ({ value: [{ key: 'theme', label: 'Theme', kind: 'choice', value: 'auto', provider: { plugin: 'engine', tier: 'core' }, isLocked: false }] }))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const start = opens.length
+  const probes = () => ran.filter(a => a[0] === 'gsettings').length
+  const before = probes()
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'a', new_string: 'b' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start + 1)
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'b', new_string: 'c' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start + 2)
+  await clock.advance(120_000)
+  await clock.settle()
+  expect(probes()).toBe(before)
+})
+
+test('auto-open: three concurrent edits open the pane once', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '' }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const start = opens.length
+  await Promise.all([1, 2, 3].map(i => $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'a', new_string: `b${i}` } as any)))
+  await clock.settle()
+  expect(opens.length).toBe(start + 1)
 })
 
 test('theme auto under WSL follows the Windows appearance through reg.exe', { timeoutMs: 20_000 }, async ($, on) => {
