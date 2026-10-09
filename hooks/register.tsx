@@ -1,7 +1,7 @@
 import { type BuiltinToolResults, type EngineInterface, type Register, type Timer, update } from 'claude-code'
 import { openCommand } from './open'
 
-import type { Activity, FileNode, FileTree, PanelTheme, Theme } from '../types'
+import type { Activity, FileNode, FileTree, Theme } from '../types'
 import { BRANCH_ICON, chainOf, type GitAction, gitActions, LIGHT_TONES, readOnly, readTargets, resolve, TONES } from './git'
 import type { RowSpec, RowsProps, Seg } from './rows'
 import { CHEVRON_CLOSED, CHEVRON_OPEN, fileIcon, GIT_COLOR } from './icons'
@@ -100,7 +100,7 @@ let view = { from: 0, max: 0 }
 let paneRoom = 0
 let sizeTick = false
 let light = false
-let skinOn = false
+let prefsRead = 0
 let still = false
 const marks = new Map<string, string>()
 let lastSync = 0
@@ -149,9 +149,15 @@ function faint(hex: string, base: string): string {
   return `#${[16, 8, 0].map(x => ch(x).toString(16).padStart(2, '0')).join('')}`
 }
 
+// Windows, or WSL on it: the appearance is in the Windows registry.
+async function onWindows($: EngineInterface): Promise<boolean> {
+  const os = await osName($)
+  return os === 'win32' || (os === 'linux' && Boolean(await $.env.get('WSL_DISTRO_NAME')))
+}
+
 async function appearance($: EngineInterface): Promise<'light' | 'dark'> {
   const os = await osName($)
-  const windows = os === 'win32' || (os === 'linux' && Boolean(await $.env.get('WSL_DISTRO_NAME')))
+  const windows = await onWindows($)
   const argv =
     os === 'darwin'
       ? ['defaults', 'read', '-g', 'AppleInterfaceStyle']
@@ -168,21 +174,26 @@ async function appearance($: EngineInterface): Promise<'light' | 'dark'> {
   }
 }
 
-// `skin`: the skins theme about to be written, in place of the one stored.
-async function readPrefs($: EngineInterface, skin?: PanelTheme | null): Promise<void> {
+async function readPrefs($: EngineInterface): Promise<void> {
+  const read = ++prefsRead
   const was = { light, still }
-  autoTheme = false
+  let auto = false
+  let isLit = false
+  let reduce = still
   try {
-    // A skin on in the skins mod says light or dark itself, so the OS is not asked.
-    skinOn = Boolean(skin === undefined ? (await $.state.get(SKIN_THEME)).value : skin)
+    const skin = (await $.state.get(SKIN_THEME)).value
     const rows = await $.config.list()
     const theme = rows.find(r => r.key === 'theme')?.value
-    autoTheme = theme === 'auto' && !skinOn
-    light = isLight(theme, autoTheme ? await appearance($) : 'dark')
-    still = rows.find(r => r.key === 'reduceMotion')?.value === true
-  } catch {
-    light = false
-  }
+    // A skin on in the skins mod says light or dark itself, so the OS is not asked; skins cannot ask Windows, so there the pane still does.
+    auto = theme === 'auto' && (!skin || (await onWindows($)))
+    isLit = skin && !auto ? skin.mode === 'light' : isLight(theme, auto ? await appearance($) : 'dark')
+    reduce = rows.find(r => r.key === 'reduceMotion')?.value === true
+  } catch {}
+  // A later read has started, so this one may have read a skins theme since replaced.
+  if (read !== prefsRead) return
+  autoTheme = auto
+  light = isLit
+  still = reduce
   pollAppearance($)
   if (light !== was.light || still !== was.still) $.ui.invalidate('ui.render')
 }
@@ -1142,11 +1153,12 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => (next.called ? next(e) : undefined))
 
   // A skin going on or off in the skins mod starts or stops the appearance poll, drawn pane or not.
-  // Under theme auto the OS is asked before a skin goes off, so the first frame without it is right.
+  // Not awaited: skins' write is not held up by the OS check.
   on('state.set', { plugin: 'skins', key: 'theme' }, async ($, e, next) => {
-    if (Boolean(e.value) !== skinOn) await readPrefs($, e.value)
-    return next(e)
-  }).catch(($, e, next) => next(e))
+    const result = await next(e)
+    void readPrefs($)
+    return result
+  }).catch(($, e, next) => (next.called ? next(e) : undefined))
 
   on('ui.close', { id: PANE }, async ($, e, next) => {
     const result = await next(e)
@@ -1355,14 +1367,16 @@ export const register: Register = (on, options) => {
     const unicode = glyphSetting === 'plain' || (glyphSetting === 'auto' && (noNerd || e.surface === 'desktop'))
     const { Box, Text, Button, Input, Client } = $.ui.resolve(e)
     const t = await get($)
-    // A skin on in the skins mod decides light or dark.
+    // A skin on in the skins mod decides light or dark, unless the pane asks the OS itself (theme auto on Windows); then a skin of the other mode is left out.
+    const own = light ? 'light' : 'dark'
     const skin = (await $.state.get(SKIN_THEME)).value
-    const mode = skin ? (skin.mode === 'light' ? 'light' : 'dark') : light ? 'light' : 'dark'
+    const drawn = skin && (!autoTheme || skin.mode === own) ? skin : null
+    const mode = drawn?.mode ?? own
     // Read even when unused, so a theme that turns up later redraws the pane.
     const saved = (await $.state.get(THEME)).value
-    // A skin on wins over Omarchy with its own colours; a light one leaves the host's background, as skins draws on it.
-    const theme: Theme = skin
-      ? { fg: skin.foreground, accent: skin.accent, muted: skin.dim, urgent: skin.red, selection: skin.selection, bg: mode === 'light' ? '' : skin.background }
+    // A skin wins over Omarchy with its own colours, on the host's background as skins draws.
+    const theme: Theme = drawn
+      ? { fg: drawn.foreground, accent: drawn.accent, muted: drawn.dim, urgent: drawn.red, selection: drawn.selection, bg: '' }
       : (omarchy && saved) || (light ? LIGHT_THEME : DEFAULT_THEME)
     const tones = mode === 'light' ? LIGHT_TONES : TONES
     const gitc = GIT_COLOR[mode]

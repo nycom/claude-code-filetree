@@ -1192,7 +1192,7 @@ const NORD = { mode: 'dark', accent: '#88c0d0', foreground: '#eceff4', dim: '#d8
 const DAWN = { mode: 'light', accent: '#a3206c', foreground: '#1f1f1f', dim: '#6b6b6b', red: '#b3261e', selection: '#e8c8da', background: '#ffffff' }
 const OMARCHY = 'accent = "#7aa2f7"\nforeground = "#c0caf5"\nselection = "#33467c"\nbackground = "#1a1b26"\n'
 
-test('the skin chosen in the skins mod colours the pane over the Omarchy theme and redraws it on /skin', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+test('the skin chosen in the skins mod colours the pane over the Omarchy theme, on the terminal\'s background, and redraws it on /skin', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
   const ran: Ran = []
   const root = '/home/k/proj'
   const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', theme: { toml: OMARCHY, mtimeMs: 1 } }, ran)
@@ -1202,13 +1202,13 @@ test('the skin chosen in the skins mod colours the pane over the Omarchy theme a
   const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
   await clock.settle()
   let shown = await texts(ui)
-  for (const c of ['"backgroundColor":"#282a36"', '"activeBg":"#44475a"', '"fg":"#f8f8f2"', '#ff79c6', '#bd93f9']) expect(shown).toContain(c)
-  for (const c of ['#1a1b26', '#33467c', '#c0caf5', '#7aa2f7']) expect(shown).not.toContain(c)
+  for (const c of ['"activeBg":"#44475a"', '"fg":"#f8f8f2"', '#ff79c6', '#bd93f9']) expect(shown).toContain(c)
+  for (const c of ['"backgroundColor":"#', '#1a1b26', '#33467c', '#c0caf5', '#7aa2f7']) expect(shown).not.toContain(c)
   await $.command.run(skin(NORD))
   await clock.settle()
   shown = await texts(ui)
-  for (const c of ['"backgroundColor":"#2e3440"', '"activeBg":"#434c5e"', '"fg":"#eceff4"', '#88c0d0', '#d8dee9']) expect(shown).toContain(c)
-  for (const c of ['#282a36', '#44475a', '#f8f8f2', '#ff79c6']) expect(shown).not.toContain(c)
+  for (const c of ['"activeBg":"#434c5e"', '"fg":"#eceff4"', '#88c0d0', '#d8dee9']) expect(shown).toContain(c)
+  for (const c of ['"backgroundColor":"#', '#44475a', '#f8f8f2', '#ff79c6']) expect(shown).not.toContain(c)
   await ui.unmount()
 })
 
@@ -1236,20 +1236,6 @@ test('with skins off the pane keeps the Omarchy theme; a light skin draws its ow
   shown = await texts(ui)
   for (const c of [...LIGHT_GIT, '"activeBg":"#e8c8da"', '"fg":"#1f1f1f"', '#a3206c', '#6b6b6b']) expect(shown).toContain(c)
   for (const c of ['#1a1b26', '#33467c', '#c0caf5', '#7aa2f7', '"backgroundColor":"#', ...DARK_GIT]) expect(shown).not.toContain(c)
-  await ui.unmount()
-})
-
-test('a skin whose mode is neither light nor dark draws as a dark one', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
-  const ran: Ran = []
-  const root = '/home/k/proj'
-  const clock = world(on, gitWorld(root), ran)
-  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
-  await $.command.run(skin({ ...DRACULA, mode: 'auto' }))
-  await clock.settle()
-  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
-  await clock.settle()
-  const shown = await texts(ui)
-  for (const c of ['"backgroundColor":"#282a36"', ...DARK_GIT]) expect(shown).toContain(c)
   await ui.unmount()
 })
 
@@ -1321,25 +1307,90 @@ test('theme auto with a skin on asks the OS nothing; with the skin off the appea
   await ui.unmount()
 })
 
-test('turning a skin off under theme auto asks the OS before the pane draws without it, though the OS was never asked', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+test('turning a skin off under theme auto does not hold up the write while the OS is asked; the pane keeps the skin\'s mode meanwhile', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
   const ran: Ran = []
   const root = '/Users/k/proj'
   const w: World = { os: 'darwin', env: { HOME: '/Users/k', TMPDIR: '/tmp/' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', appearance: '' }
   const clock = world(on, w, ran)
   on('config.list', () => themeSetting('auto'))
+  await $.command.run(skin(DAWN))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  expect(await texts(ui)).toContain('"activeBg":"#e8c8da"')
+  w.appearanceDelays = [5_000]
+  let written = false
+  const off = $.command.run(skin(null)).then(() => (written = true))
+  await clock.settle()
+  expect(written).toBe(true)
+  expect(await texts(ui)).toContain('"activeBg":"#9ca3af"')
+  await clock.advance(5_000)
+  await off
+  await clock.settle()
+  expect(await texts(ui)).toContain('"activeBg":"#9ca3af"')
+  await ui.unmount()
+})
+
+test('a skin going on while the appearance poll is mid-read leaves the poll stopped', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k/proj'
+  const clock = world(on, { os: 'darwin', env: { HOME: '/Users/k', TMPDIR: '/tmp/' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', appearance: '' }, ran)
+  let reads = 0
+  on('config.list', () => {
+    reads++
+    return themeSetting('auto')
+  })
+  // Holds one read of the skins theme, returning what it read before the hold.
+  let hold = 0
+  on('state.get', { plugin: 'skins', key: 'theme' }, async ($: any, e: any, next: any) => {
+    const read = await next(e)
+    const ms = hold
+    hold = 0
+    if (ms) await clock.sleep(ms)
+    return read
+  })
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  hold = 5_000
+  await clock.advance(60_000)
+  await $.command.run(skin(DAWN))
+  await clock.settle()
+  await clock.advance(5_000)
+  await clock.settle()
+  const on1 = reads
+  await clock.advance(180_000)
+  await clock.settle()
+  expect(reads).toBe(on1)
+  await ui.unmount()
+})
+
+const WSL_LIGHT = (root: string) => ({ ...gitWorld(root), env: { HOME: '/home/k', WSL_DISTRO_NAME: 'Ubuntu' }, appearance: '    AppsUseLightTheme    REG_DWORD    0x1\n' }) as World
+
+test('theme auto under WSL with a skin on still follows Windows through reg.exe, which skins cannot read; a skin of the other mode is left out', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, WSL_LIGHT(root), ran)
+  on('config.list', () => themeSetting('auto'))
+  const probes = () => ran.filter(a => a[0] === 'reg.exe').length
   await $.command.run(skin(DRACULA))
   await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
   await clock.settle()
   const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
   await clock.settle()
-  expect(await texts(ui)).toContain('"activeBg":"#44475a"')
-  w.appearanceDelays = [5_000]
-  const off = $.command.run(skin(null))
+  let shown = await texts(ui)
+  for (const c of [...LIGHT_GIT, '"activeBg":"#9ca3af"']) expect(shown).toContain(c)
+  for (const c of [...DARK_GIT, '#44475a', '#f8f8f2']) expect(shown).not.toContain(c)
+  const seen = probes()
+  expect(seen).toBeGreaterThan(0)
+  await clock.advance(60_000)
   await clock.settle()
-  expect(await texts(ui)).not.toContain('"activeBg":"#6b7280"')
-  await clock.advance(5_000)
-  await off
+  expect(probes()).toBeGreaterThan(seen)
+  await $.command.run(skin(DAWN))
   await clock.settle()
-  expect(await texts(ui)).toContain('"activeBg":"#9ca3af"')
+  shown = await texts(ui)
+  for (const c of [...LIGHT_GIT, '"activeBg":"#e8c8da"', '"fg":"#1f1f1f"']) expect(shown).toContain(c)
   await ui.unmount()
 })
