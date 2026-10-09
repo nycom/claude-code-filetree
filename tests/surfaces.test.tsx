@@ -711,7 +711,7 @@ test('the pane takes its background from the Omarchy theme and follows a theme s
   await ui.unmount()
 })
 
-test('without an Omarchy theme the pane keeps the terminal background and nothing polls', { timeoutMs: 20_000 }, async ($, on) => {
+test('without an Omarchy theme the pane keeps the terminal background; the poll only stats, so a theme set later is picked up', { timeoutMs: 20_000 }, async ($, on) => {
   const ran: Ran = []
   const root = '/home/k/proj'
   const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '' }, ran)
@@ -722,7 +722,7 @@ test('without an Omarchy theme the pane keeps the terminal background and nothin
   const stats = ran.filter(a => a[0] === 'theme-stat').length
   await clock.advance(10_000)
   await clock.settle()
-  expect(ran.filter(a => a[0] === 'theme-stat').length).toBe(stats)
+  expect(ran.filter(a => a[0] === 'theme-stat').length).toBeGreaterThan(stats)
   expect(await texts(ui)).not.toContain('"backgroundColor":"#')
   await ui.unmount()
 })
@@ -1016,4 +1016,20 @@ test('auto-open: nothing at session start, the first write opens the pane, an op
   await $.tool.call({ tool: 'Write', file_path: `${root}/a.txt`, content: 'c' } as any)
   await clock.settle()
   expect(opens.length).toBe(start + 1)
+})
+
+test('auto-open: an inline pane is never opened by a write', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '' }, ran)
+  on('ui.close', () => ({ value: undefined }))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: { ...paneProps(60), placement: 'inline' } })
+  await clock.settle()
+  const start = opens.length
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'a', new_string: 'b' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start)
+  await ui.unmount()
 })

@@ -1095,7 +1095,8 @@ export const register: Register = (on, options) => {
       await readPrefs($)
       await loadTheme($)
       themePoll?.cancel()
-      themePoll = themeMtime ? $.clock.every(THEME_POLL_MS, () => void loadTheme($)) : null
+      // Polled even when missing, so a theme set mid-session is picked up; a stat skips an unchanged file.
+      themePoll = $.clock.every(THEME_POLL_MS, () => void loadTheme($))
       const t = await get($)
       marks.clear()
       if (t.flashOn) await patch($, () => ({ flash: [], flashDim: [], flashOn: false, flashTones: {} }))
