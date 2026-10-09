@@ -39,8 +39,6 @@ const TREE = { plugin: 'filetree', key: 'tree' } as const
 const THEME = { plugin: 'filetree', key: 'theme' } as const
 const ACTIVITY = { plugin: 'filetree', key: 'activity' } as const
 const PANE = 'filetree'
-const ramps = (set: typeof TONES) => Object.fromEntries(Object.entries(set).map(([k, v]) => [k, { bright: v.bright, dim: v.dim }]))
-const SHIMMER = { dark: ramps(TONES), light: ramps(LIGHT_TONES) }
 const BRANCH_ROW = '#branch'
 const FLASH_MS = 2700
 const RUNNING_MAX_MS = 600_000
@@ -52,6 +50,7 @@ const SEARCH_REVEAL_LIMIT = 60
 const ACTIVITY_TTL_MS = 45_000
 const HOST_BG = { dark: '#262624', light: '#faf9f5' }
 const SCAN_DEPTH = 6
+const LOCKFILES = ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'Cargo.lock', 'uv.lock', 'poetry.lock', 'go.sum', 'Gemfile.lock', 'composer.lock']
 const MARK: Record<string, string> = { read: 'r', write: 'w', commit: '●' }
 const THEME_FILE = '.local/state/omarchy/current/theme/colors.toml'
 const THEME_POLL_MS = 2000
@@ -73,6 +72,8 @@ const SIZE_WALK_LIMIT = 50_000
 let blink: Timer | null = null
 let themePoll: Timer | null = null
 let appearancePoll: Timer | null = null
+let autoTheme = false
+let paneOpen = false
 let themeMtime: number | null = null
 let generation = 0
 let lastPress = { key: '', at: 0 }
@@ -162,23 +163,35 @@ async function appearance($: EngineInterface): Promise<'light' | 'dark'> {
 
 async function readPrefs($: EngineInterface): Promise<void> {
   const was = { light, still }
-  let auto = false
+  autoTheme = false
   try {
     const rows = await $.config.list()
     const theme = rows.find(r => r.key === 'theme')?.value
-    auto = theme === 'auto'
-    light = isLight(theme, auto ? await appearance($) : 'dark')
+    autoTheme = theme === 'auto'
+    light = isLight(theme, autoTheme ? await appearance($) : 'dark')
     still = rows.find(r => r.key === 'reduceMotion')?.value === true
   } catch {
     light = false
   }
-  // ponytail: under theme auto a system appearance flip shows within 60s; a host appearance event would make it instant.
-  if (auto && !appearancePoll) appearancePoll = $.clock.every(APPEARANCE_POLL_MS, () => void readPrefs($))
-  else if (!auto && appearancePoll) {
+  pollAppearance($)
+  if (light !== was.light || still !== was.still) $.ui.invalidate('ui.render')
+}
+
+// The engine does not raise a plugin's own $.ui.open/close to its hooks: those call sites report here too.
+function paneShown($: EngineInterface, open: boolean): void {
+  const reopened = open && !paneOpen
+  paneOpen = open
+  if (reopened) void readPrefs($)
+  else pollAppearance($)
+}
+
+// ponytail: under theme auto, with the pane open, a system appearance flip shows within 60s; a host appearance event would make it instant.
+function pollAppearance($: EngineInterface): void {
+  if (autoTheme && paneOpen && !appearancePoll) appearancePoll = $.clock.every(APPEARANCE_POLL_MS, () => void readPrefs($))
+  else if (!(autoTheme && paneOpen) && appearancePoll) {
     appearancePoll.cancel()
     appearancePoll = null
   }
-  if (light !== was.light || still !== was.still) $.ui.invalidate('ui.render')
 }
 
 async function get($: EngineInterface): Promise<FileTree> {
@@ -331,8 +344,10 @@ async function reset($: EngineInterface, root: string, focus = false): Promise<v
   sizeQueue = []
   await put($, () => ({ ...emptyTree(root), showHidden: prev.showHidden, showSize: prev.root ? prev.showSize : sizeDefault }))
   const title = `Files: ${root.split('/').pop() || root}`
-  if (focus) await $.ui.open({ id: PANE, title, focus: true })
-  else if (!noDock) await $.ui.open({ id: PANE, title })
+  if (focus || !noDock) {
+    await $.ui.open({ id: PANE, title, ...(focus ? { focus: true } : {}) })
+    paneShown($, true)
+  }
   await loadDirs($, [root])
   await detectRepo($)
   await refreshGit($)
@@ -790,7 +805,12 @@ async function afterBash($: EngineInterface, jobs: Job[]): Promise<void> {
     const found = fresh.top
       ? await changedInRepo($, t.root, since, before, fresh.ignored)
       : { hits: since.os === 'win32' ? [] : await changedSince($, t.root, since, NO_REPO_DEPTH), gone: [] }
-    await staleSizes($, [...found.hits, ...found.gone])
+    const capped = found.hits.some(p => relative(t.root, p).split('/').length >= (fresh.top ? SCAN_DEPTH : NO_REPO_DEPTH))
+    // The scan is blind to pruned or ignored folders (node_modules) and past its depth cap: re-size everything when it placed no write,
+    // and the blind folders when a lockfile changed (an install also wrote into them).
+    const installed = found.hits.some(p => LOCKFILES.includes(p.slice(p.lastIndexOf('/') + 1)))
+    const blind = installed ? Object.keys(fresh.dirSizes).filter(d => underAny(d, ignored, t.root) || relative(t.root, d).split('/').some(s => PRUNE.includes(s))) : []
+    await staleSizes($, capped || found.hits.length + found.gone.length === 0 ? undefined : [...found.hits, ...found.gone, ...blind])
     const hits = found.hits.filter(x => inside(t.root, x) && !underAny(x, ignored, t.root)).slice(0, FIND_LIMIT)
     await revealPaths($, hits)
     const loaded = await get($)
@@ -798,7 +818,6 @@ async function afterBash($: EngineInterface, jobs: Job[]): Promise<void> {
     const listed = await loadDirs($, dirs)
     if (!fresh.top && since.os === 'win32')
       for (const kids of listed.values()) for (const n of kids) if (n.mtime > since.ms && hits.length < FIND_LIMIT) hits.push(n.id)
-    if (!fresh.top && since.os === 'win32' && hits.length) await staleSizes($, hits)
     await patch($, cur => {
       const ids = new Set(cur.nodes.map(n => n.id))
       return { expanded: cur.expanded.filter(id => ids.has(id)) }
@@ -1072,18 +1091,31 @@ export const register: Register = (on, options) => {
       await setActivities($, cur => cur.map(a => (a.state === 'running' ? { ...a, state: 'failed', label: `${a.kind} interrupted` } : a)))
       const cwd = await cwdOf($)
       if (!t.root || t.nodes.length === 0 || (follow && t.root !== cwd)) await reset($, cwd)
-      else if (!noDock) await $.ui.open({ id: PANE, title: `Files: ${t.root.split('/').pop() || t.root}` })
+      else if (!noDock) {
+        await $.ui.open({ id: PANE, title: `Files: ${t.root.split('/').pop() || t.root}` })
+        paneShown($, true)
+      }
     })()
     return next(e)
   })
 
   on('config.set', async ($, e, next) => {
     const result = await next(e)
-    if (result.deny === undefined && (e.key === 'theme' || e.key === 'reduceMotion')) {
-      await readPrefs($)
-    }
+    if (result.deny === undefined && (e.key === 'theme' || e.key === 'reduceMotion')) await readPrefs($)
     return result
-  })
+  }).catch(($, e, next) => next(e))
+
+  on('ui.open', { id: PANE }, async ($, e, next) => {
+    const result = await next(e)
+    paneShown($, true)
+    return result
+  }).catch(($, e, next) => next(e))
+
+  on('ui.close', { id: PANE }, async ($, e, next) => {
+    const result = await next(e)
+    paneShown($, false)
+    return result
+  }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'filetree' }, async ($, e) => {
     if (!e.presentation.isFullscreen) return { text: 'filetree shows in the sidebar, which needs the fullscreen layout. Run /tui fullscreen, then /filetree.' }
@@ -1276,6 +1308,7 @@ export const register: Register = (on, options) => {
     if (e.surface !== 'terminal' && e.surface !== 'desktop') return next(e)
     if (e.surface === 'terminal' && e.props.placement === 'inline') {
       noDock = true
+      paneShown($, false)
       void $.ui.close({ id: PANE }).catch(() => undefined)
       const { Box: Empty } = $.ui.resolve(e)
       return <Empty />
@@ -1520,7 +1553,7 @@ export const register: Register = (on, options) => {
         <Client
           key="rows"
           module="./rows.tsx"
-          props={{ rows: specs, active: t.cursor, activeBg: theme.selection, hoverBg: faint(theme.selection, theme.bg || HOST_BG[mode]), tones: SHIMMER[mode], ...(theme.fg ? { fg: theme.fg } : {}), still, pointer, ...(bar ? { bar } : {}) } satisfies RowsProps}
+          props={{ rows: specs, active: t.cursor, activeBg: theme.selection, hoverBg: faint(theme.selection, theme.bg || HOST_BG[mode]), tones, ...(theme.fg ? { fg: theme.fg } : {}), still, pointer, ...(bar ? { bar } : {}) } satisfies RowsProps}
         />
         <Box flexGrow={1} />
         {(t.selected || latest) && (

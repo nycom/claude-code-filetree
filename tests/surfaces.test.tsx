@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { ancestorsOf, formatSize, isLight, middle, replaceChildren, stamp, toNodes } from '../hooks/tree'
+import { ancestorsOf, cells, formatSize, isLight, middle, replaceChildren, stamp, toNodes } from '../hooks/tree'
 
 type World = {
   os: 'darwin' | 'linux' | 'win32'
@@ -856,7 +856,7 @@ test('names cut in the middle keep their extension and never split a grapheme', 
   expect(cut.startsWith('very-long-')).toBe(true)
   expect(cut.endsWith('…t.tsx')).toBe(true)
   const family = '\u{1F469}\u200D\u{1F469}\u200D\u{1F467}'
-  expect(middle(family.repeat(6) + '.md', 6)).toBe(`${family.repeat(2)}….md`)
+  expect(middle(family.repeat(6) + '.md', 6)).toBe(`${family}….md`)
   expect(middle('é'.normalize('NFD').repeat(8), 5)).toBe(`${'é'.normalize('NFD').repeat(3)}…${'é'.normalize('NFD')}`)
 })
 
@@ -946,5 +946,55 @@ test('theme auto follows a system appearance flip mid-session', { timeoutMs: 20_
   await clock.advance(60_000)
   await clock.settle()
   expect(await texts(ui)).toContain('"activeBg":"#6b7280"')
+  await ui.unmount()
+  const inline = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: { ...paneProps(60), placement: 'inline' } })
+  await clock.settle()
+  const probes = ran.filter(a => a[0] === 'defaults').length
+  await clock.advance(180_000)
+  await clock.settle()
+  expect(ran.filter(a => a[0] === 'defaults').length).toBe(probes)
+  await inline.unmount()
+})
+
+test('wide CJK and emoji names are cut by terminal cells and keep their extension', async () => {
+  for (const name of ['設定ファイル'.repeat(5) + '.json', '📁ノート'.repeat(6) + '.md', 'ab設定cd📁'.repeat(5) + '.tsx']) {
+    for (const cols of [12, 20, 31]) {
+      const cut = middle(name, cols)
+      expect(cells(cut)).toBeLessThanOrEqual(cols)
+      expect(cut.endsWith(name.slice(name.lastIndexOf('.')))).toBe(true)
+      expect(cut).toContain('…')
+    }
+  }
+  expect(cells('設定.json')).toBe(9)
+  expect(cells('📁a')).toBe(3)
+})
+
+test('size column: writes the scan cannot place re-size everything; a lockfile change re-sizes ignored folders, other writes do not', { timeoutMs: 20_000, options: { column: 'size' } }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const w: World = {
+    os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: root,
+    dirs: { [root]: [['node_modules', 'dir'], ['src', 'dir'], ['package-lock.json', 'file']], [`${root}/node_modules`]: [['x', 'dir']], [`${root}/src`]: [['a.ts', 'file']] },
+    status: '## main\0!! node_modules/\0', numstat: '', find: '',
+    du: { [`${root}/node_modules`]: `8\t${root}/node_modules\n`, [`${root}/src`]: `4\t${root}/src\n` },
+  }
+  const clock = world(on, w, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  const du = (dir: string) => ran.filter(a => a[0] === 'du' && a.at(-1) === `${root}/${dir}`).length
+  expect([du('node_modules'), du('src')]).toEqual([1, 1])
+  await $.tool.call({ tool: 'Bash', command: 'npm install' } as any)
+  await clock.settle()
+  expect([du('node_modules'), du('src')]).toEqual([2, 2])
+  w.find = `${root}/package-lock.json\0`
+  await $.tool.call({ tool: 'Bash', command: 'npm install' } as any)
+  await clock.settle()
+  expect([du('node_modules'), du('src')]).toEqual([3, 2])
+  w.find = `${root}/a.txt\0`
+  await $.tool.call({ tool: 'Bash', command: 'echo x > a.txt' } as any)
+  await clock.settle()
+  expect([du('node_modules'), du('src')]).toEqual([3, 2])
   await ui.unmount()
 })
