@@ -177,7 +177,8 @@ async function readPrefs($: EngineInterface): Promise<void> {
     const rows = await $.config.list()
     const theme = rows.find(r => r.key === 'theme')?.value
     autoTheme = theme === 'auto' && !skinOn
-    light = isLight(theme, autoTheme ? await appearance($) : 'dark')
+    // Under auto with a skin on, the last OS answer stays, so turning the skin off draws it at once.
+    if (autoTheme || theme !== 'auto') light = isLight(theme, autoTheme ? await appearance($) : 'dark')
     still = rows.find(r => r.key === 'reduceMotion')?.value === true
   } catch {
     light = false
@@ -1140,6 +1141,13 @@ export const register: Register = (on, options) => {
     return result
   }).catch(($, e, next) => (next.called ? next(e) : undefined))
 
+  // A skin going on or off in the skins mod starts or stops the appearance poll, drawn pane or not.
+  on('state.set', { plugin: 'skins', key: 'theme' }, async ($, e, next) => {
+    const result = await next(e)
+    if (Boolean(e.value) !== skinOn) void readPrefs($)
+    return result
+  }).catch(($, e, next) => (next.called ? next(e) : undefined))
+
   on('ui.close', { id: PANE }, async ($, e, next) => {
     const result = await next(e)
     paneShown($, false)
@@ -1347,15 +1355,17 @@ export const register: Register = (on, options) => {
     const unicode = glyphSetting === 'plain' || (glyphSetting === 'auto' && (noNerd || e.surface === 'desktop'))
     const { Box, Text, Button, Input, Client } = $.ui.resolve(e)
     const t = await get($)
-    // A skin on in the skins mod decides light or dark; turning it on or off starts or stops the appearance poll.
+    // A skin on in the skins mod decides light or dark.
     const skin = (await $.state.get(SKIN_THEME)).value
-    if (Boolean(skin) !== skinOn) void readPrefs($)
-    const mode = skin?.mode ?? (light ? 'light' : 'dark')
+    const mode = skin ? (skin.mode === 'light' ? 'light' : 'dark') : light ? 'light' : 'dark'
     // Read even when unused, so a theme that turns up later redraws the pane.
     const saved = (await $.state.get(THEME)).value
-    // The skin the skins mod draws the chat in wins over Omarchy; a light one, like a light Omarchy theme, is left out.
-    const skinned: Theme | null = skin?.mode === 'dark' ? { fg: skin.foreground, accent: skin.accent, muted: skin.dim, urgent: skin.red, selection: skin.selection, bg: skin.background } : null
-    const theme: Theme = skinned ?? ((omarchy && saved) || (mode === 'light' ? LIGHT_THEME : DEFAULT_THEME))
+    // A skin on wins over Omarchy: a dark one gives its own colours, a light one the pane's light palette, as a light Omarchy theme does.
+    const theme: Theme = !skin
+      ? (omarchy && saved) || (light ? LIGHT_THEME : DEFAULT_THEME)
+      : mode === 'light'
+        ? LIGHT_THEME
+        : { fg: skin.foreground, accent: skin.accent, muted: skin.dim, urgent: skin.red, selection: skin.selection, bg: skin.background }
     const tones = mode === 'light' ? LIGHT_TONES : TONES
     const gitc = GIT_COLOR[mode]
     const now = await $.clock.now()
