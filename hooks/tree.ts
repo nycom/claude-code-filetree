@@ -337,15 +337,33 @@ export function stamp(ms: number, now: number): string {
 const segmenter = typeof Intl.Segmenter === 'function' ? new Intl.Segmenter() : null
 const graphemes = (s: string) => (segmenter ? Array.from(segmenter.segment(s), x => x.segment) : Array.from(s))
 
-// Cuts the middle of a name to `cols` graphemes, keeping its extension: `very-lo…e.test.ts`.
+// ponytail: East Asian Wide/Fullwidth ranges and emoji presentation count 2 cells, everything else 1; full UAX #11 if names misalign.
+const WIDE = /[\u1100-\u115f\u2e80-\u303e\u3041-\u33ff\u3400-\u4dbf\u4e00-\u9fff\ua000-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6\u{20000}-\u{3fffd}]|\p{Emoji_Presentation}|\ufe0f/u
+const cell = (g: string) => (WIDE.test(g) ? 2 : 1)
+
+export function cells(s: string): number {
+  return graphemes(s).reduce((n, g) => n + cell(g), 0)
+}
+
+// Cuts the middle of a name to `cols` terminal cells, keeping its extension: `very-lo…e.test.ts`.
 export function middle(name: string, cols: number): string {
   const g = graphemes(name)
-  if (g.length <= cols) return name
-  const keep = Math.max(1, cols - 1)
+  if (g.reduce((n, x) => n + cell(x), 0) <= cols) return name
+  const budget = Math.max(1, cols - 1)
+  const take = (list: string[], room: number) => {
+    const out: string[] = []
+    let used = 0
+    for (const x of list) {
+      if (used + cell(x) > room) break
+      out.push(x)
+      used += cell(x)
+    }
+    return { out, used }
+  }
   const dot = name.lastIndexOf('.')
-  const ext = dot > 0 ? graphemes(name.slice(dot)).length : 0
-  const tail = ext && ext < keep - 1 ? Math.max(ext, Math.floor(keep / 3)) : Math.floor(keep / 3)
-  return `${g.slice(0, keep - tail).join('')}…${tail ? g.slice(-tail).join('') : ''}`
+  const ext = dot > 0 ? cells(name.slice(dot)) : 0
+  const tail = take([...g].reverse(), ext && ext < budget - 1 ? Math.max(ext, Math.floor(budget / 3)) : Math.floor(budget / 3))
+  return `${take(g, budget - tail.used).out.join('')}…${tail.out.reverse().join('')}`
 }
 
 export function formatSize(bytes: number): string {
