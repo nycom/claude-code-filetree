@@ -969,7 +969,7 @@ test('wide CJK and emoji names are cut by terminal cells and keep their extensio
   expect(cells('📁a')).toBe(3)
 })
 
-test('size column: writes the scan cannot place re-size ignored folders, or everything when nothing was found', { timeoutMs: 20_000, options: { column: 'size' } }, async ($, on) => {
+test('size column: writes the scan cannot place re-size everything; a lockfile change re-sizes ignored folders, other writes do not', { timeoutMs: 20_000, options: { column: 'size' } }, async ($, on) => {
   const ran: Ran = []
   const root = '/home/k/proj'
   const w: World = {
@@ -990,6 +990,10 @@ test('size column: writes the scan cannot place re-size ignored folders, or ever
   expect([du('node_modules'), du('src')]).toEqual([2, 2])
   w.find = `${root}/package-lock.json\0`
   await $.tool.call({ tool: 'Bash', command: 'npm install' } as any)
+  await clock.settle()
+  expect([du('node_modules'), du('src')]).toEqual([3, 2])
+  w.find = `${root}/a.txt\0`
+  await $.tool.call({ tool: 'Bash', command: 'echo x > a.txt' } as any)
   await clock.settle()
   expect([du('node_modules'), du('src')]).toEqual([3, 2])
   await ui.unmount()

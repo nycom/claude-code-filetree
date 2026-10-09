@@ -50,6 +50,7 @@ const SEARCH_REVEAL_LIMIT = 60
 const ACTIVITY_TTL_MS = 45_000
 const HOST_BG = { dark: '#262624', light: '#faf9f5' }
 const SCAN_DEPTH = 6
+const LOCKFILES = ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'Cargo.lock', 'uv.lock', 'poetry.lock', 'go.sum', 'Gemfile.lock', 'composer.lock']
 const MARK: Record<string, string> = { read: 'r', write: 'w', commit: '●' }
 const THEME_FILE = '.local/state/omarchy/current/theme/colors.toml'
 const THEME_POLL_MS = 2000
@@ -805,8 +806,10 @@ async function afterBash($: EngineInterface, jobs: Job[]): Promise<void> {
       ? await changedInRepo($, t.root, since, before, fresh.ignored)
       : { hits: since.os === 'win32' ? [] : await changedSince($, t.root, since, NO_REPO_DEPTH), gone: [] }
     const capped = found.hits.some(p => relative(t.root, p).split('/').length >= (fresh.top ? SCAN_DEPTH : NO_REPO_DEPTH))
-    // The scan is blind to pruned or ignored folders (node_modules) and past its depth cap: re-size those, or everything when it placed no write.
-    const blind = Object.keys(fresh.dirSizes).filter(d => underAny(d, ignored, t.root) || relative(t.root, d).split('/').some(s => PRUNE.includes(s)))
+    // The scan is blind to pruned or ignored folders (node_modules) and past its depth cap: re-size everything when it placed no write,
+    // and the blind folders when a lockfile changed (an install also wrote into them).
+    const installed = found.hits.some(p => LOCKFILES.includes(p.slice(p.lastIndexOf('/') + 1)))
+    const blind = installed ? Object.keys(fresh.dirSizes).filter(d => underAny(d, ignored, t.root) || relative(t.root, d).split('/').some(s => PRUNE.includes(s))) : []
     await staleSizes($, capped || found.hits.length + found.gone.length === 0 ? undefined : [...found.hits, ...found.gone, ...blind])
     const hits = found.hits.filter(x => inside(t.root, x) && !underAny(x, ignored, t.root)).slice(0, FIND_LIMIT)
     await revealPaths($, hits)
