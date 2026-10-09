@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { ancestorsOf, cells, formatSize, isLight, middle, replaceChildren, stamp, toNodes } from '../hooks/tree'
+import { ancestorsOf, cells, formatSize, isLight, middle, parseTheme, replaceChildren, stamp, toNodes } from '../hooks/tree'
 
 type World = {
   os: 'darwin' | 'linux' | 'win32'
@@ -21,6 +21,8 @@ type World = {
   duDelays?: number[]
   links?: string[]
   appearance?: string
+  mtimes?: Record<string, number>
+  openFails?: boolean
 }
 type Ran = string[][]
 const opens: unknown[] = []
@@ -36,6 +38,7 @@ function world(on: any, w: World, ran: Ran) {
   on('command.register', () => ({ value: undefined }))
   on('ui.open', (_$: any, e: any) => {
     opens.push(e)
+    if (w.openFails) throw new Error('no room for the pane')
     return { value: { isPlaced: true } }
   })
   on('ui.toast', (_$: any, e: any) => {
@@ -55,7 +58,7 @@ function world(on: any, w: World, ran: Ran) {
     if (w.denied?.includes(bare)) return { deny: `EACCES: permission denied, scandir '${path}'` }
     const kids = dirOf(path)
     if (!kids) throw new Error(`ENOENT ${e.path}`)
-    const value = kids.map(([name, kind]) => ({ name, kind, size: 1, mtimeMs: 1_700_000_000_000, isLink: w.links?.includes(`${bare}/${name}`) ?? false }))
+    const value = kids.map(([name, kind]) => ({ name, kind, size: 1, mtimeMs: w.mtimes?.[name] ?? 1_700_000_000_000, isLink: w.links?.includes(`${bare}/${name}`) ?? false }))
     const delay = w.delays?.[bare]?.shift()
     if (delay) await clock.sleep(delay)
     return { value }
@@ -87,6 +90,7 @@ function world(on: any, w: World, ran: Ran) {
       return ok(w.du?.[argv.at(-1) ?? ''] ?? '')
     }
     if (argv[0] === 'defaults') return w.appearance ? ok(w.appearance) : { value: { exitCode: 1, stdout: '', stderr: 'does not exist', isStdoutTruncated: false, isStderrTruncated: false } }
+    if (argv[0] === 'reg.exe') return ok(w.appearance ?? '')
     if (argv[0] === 'uname') return ok(w.os === 'darwin' ? 'Darwin\n' : 'Linux\n')
     if (argv[0] === 'sh') return ok('missing\n')
     if (argv[0] === 'git') {
@@ -711,19 +715,36 @@ test('the pane takes its background from the Omarchy theme and follows a theme s
   await ui.unmount()
 })
 
-test('without an Omarchy theme the pane keeps the terminal background; the poll only stats, so a theme set later is picked up', { timeoutMs: 20_000 }, async ($, on) => {
+test('without an Omarchy theme the pane keeps the terminal background; a missing theme is re-checked every minute, a present one every 2s', { timeoutMs: 20_000 }, async ($, on) => {
   const ran: Ran = []
   const root = '/home/k/proj'
-  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '' }, ran)
+  const w: World = { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '' }
+  const clock = world(on, w, ran)
+  const stats = () => ran.filter(a => a[0] === 'theme-stat').length
   await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
   await clock.settle()
   const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
   await clock.settle()
-  const stats = ran.filter(a => a[0] === 'theme-stat').length
+  expect(await texts(ui)).not.toContain('"backgroundColor":"#')
+  const missing = stats()
   await clock.advance(10_000)
   await clock.settle()
-  expect(ran.filter(a => a[0] === 'theme-stat').length).toBeGreaterThan(stats)
+  expect(stats()).toBe(missing)
+  w.theme = { toml: 'background = "#1e1e2e"\n', mtimeMs: 1 }
+  await clock.advance(50_000)
+  await clock.settle()
+  expect(stats()).toBe(missing + 1)
+  expect(await texts(ui)).toContain('"backgroundColor":"#1e1e2e"')
+  await clock.advance(10_000)
+  await clock.settle()
+  expect(stats()).toBe(missing + 6)
+  w.theme = undefined
+  await clock.advance(2_000)
+  await clock.settle()
   expect(await texts(ui)).not.toContain('"backgroundColor":"#')
+  await clock.advance(10_000)
+  await clock.settle()
+  expect(stats()).toBe(missing + 7)
   await ui.unmount()
 })
 
@@ -1031,5 +1052,74 @@ test('auto-open: an inline pane is never opened by a write', { timeoutMs: 20_000
   await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'a', new_string: 'b' } as any)
   await clock.settle()
   expect(opens.length).toBe(start)
+  await ui.unmount()
+})
+
+test('auto-open on Windows outside a repo: a Bash write found by listing opens the pane', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = 'C:/Users/k/scratch'
+  const clock = world(on, { os: 'win32', env: { OS: 'Windows_NT', USERPROFILE: 'C:\\Users\\k' }, cwd: 'C:\\Users\\k\\scratch', top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '', mtimes: { 'a.txt': 1_800_000_000_500 } }, ran)
+  await $.session.start({ cwd: 'C:\\Users\\k\\scratch', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const start = opens.length
+  await $.tool.call({ tool: 'Bash', command: 'echo x > a.txt' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start + 1)
+})
+
+test('auto-open: activity reads never opens the pane on an edit', { timeoutMs: 20_000, options: { activity: 'reads' } }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '' }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const start = opens.length
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'a', new_string: 'b' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start)
+})
+
+test('auto-open: a pane that fails to open still shows the edit and is tried again on the next one', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '', openFails: true }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const start = opens.length
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'a', new_string: 'b' } as any)
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'b', new_string: 'c' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start + 2)
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  expect(await texts(ui)).toContain(shimmer('a.txt', 'orange'))
+  await ui.unmount()
+})
+
+test('theme auto under WSL follows the Windows appearance through reg.exe', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k', WSL_DISTRO_NAME: 'Ubuntu' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', appearance: '    AppsUseLightTheme    REG_DWORD    0x1\n' }, ran)
+  on('config.list', () => ({ value: [{ key: 'theme', label: 'Theme', kind: 'choice', value: 'auto', provider: { plugin: 'engine', tier: 'core' }, isLocked: false }] }))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  expect(ran.some(a => a[0] === 'reg.exe')).toBe(true)
+  expect(await texts(ui)).toContain('"activeBg":"#9ca3af"')
+  await ui.unmount()
+})
+
+test('an Omarchy light theme leaves the palette to Claude Code; dim text takes dark_foreground, not the muted border tone', { timeoutMs: 20_000 }, async ($, on) => {
+  expect(parseTheme('muted = "#414868"\ndark_foreground = "#a9b1d6"\n').muted).toBe('#a9b1d6')
+  expect(parseTheme('muted = "#414868"\n').muted).toBe('#414868')
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', theme: { toml: 'mode = "light"\nbackground = "#fafafa"\n', mtimeMs: 1 } }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  expect(await texts(ui)).not.toContain('"backgroundColor":"#')
   await ui.unmount()
 })

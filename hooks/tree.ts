@@ -56,12 +56,14 @@ export function emptyTree(root: string): FileTree {
   }
 }
 
-export function parseTheme(toml: string): Theme {
+// An Omarchy colors.toml; null for a light one (`mode = "light"`), whose palette is left to Claude Code's own theme.
+export function parseTheme(toml: string): Theme | null {
+  if (/^mode\s*=\s*"light"/m.test(toml)) return null
   const get = (k: string) => toml.match(new RegExp(`^${k}\\s*=\\s*"(#[0-9a-fA-F]{6})"`, 'm'))?.[1]
   return {
     fg: get('foreground') ?? get('color7') ?? DEFAULT_THEME.fg,
     accent: get('accent') ?? get('color4') ?? DEFAULT_THEME.accent,
-    muted: get('muted') ?? get('color8') ?? DEFAULT_THEME.muted,
+    muted: get('dark_foreground') ?? get('muted') ?? get('color8') ?? DEFAULT_THEME.muted,
     urgent: get('red') ?? get('color1') ?? DEFAULT_THEME.urgent,
     selection: get('selection') ?? DEFAULT_THEME.selection,
     bg: get('dark_background') ?? get('background') ?? DEFAULT_THEME.bg,

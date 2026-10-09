@@ -64,7 +64,7 @@ Installed it as `filetree@filetree` before the repository was renamed? Nothing t
 - Click to select, arrow keys to move through the tree
 - Light on large repos: outside a repo it only checks once whether one exists, and every git call is scoped to the cwd
 - Nerd Font icons with a plain Unicode fallback
-- Light and dark palettes follow Claude Code's `theme` setting. `auto` is resolved from the OS appearance and re-checked every 60 seconds while the pane is open. On Omarchy, the pane takes its colors and background from the current theme and follows theme switches
+- Light and dark palettes follow Claude Code's `theme` setting. `auto` is resolved from the OS appearance (Windows' under WSL) and re-checked every 60 seconds while the pane is open. On Omarchy, the pane takes its colors and background from the current dark theme and follows theme switches; a light Omarchy theme leaves the palette to Claude Code's setting
 
 ### Resizing the pane
 

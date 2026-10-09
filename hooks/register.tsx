@@ -54,6 +54,7 @@ const LOCKFILES = ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lock
 const MARK: Record<string, string> = { read: 'r', write: 'w', commit: '●' }
 const THEME_FILE = '.local/state/omarchy/current/theme/colors.toml'
 const THEME_POLL_MS = 2000
+const THEME_MISSING_POLL_MS = 60_000
 const APPEARANCE_POLL_MS = 60_000
 const FONT_SCRIPT =
   'if command -v fc-list >/dev/null 2>&1; then f=$(fc-list ":charset=$1" file | head -n1 | cut -d: -f1); ' +
@@ -75,6 +76,8 @@ let appearancePoll: Timer | null = null
 let autoTheme = false
 let paneOpen = false
 let themeMtime: number | null = null
+let themePath = ''
+let omarchy = false
 let generation = 0
 let lastPress = { key: '', at: 0 }
 let noNerd = false
@@ -145,17 +148,18 @@ function faint(hex: string, base: string): string {
 
 async function appearance($: EngineInterface): Promise<'light' | 'dark'> {
   const os = await osName($)
+  const windows = os === 'win32' || (os === 'linux' && Boolean(await $.env.get('WSL_DISTRO_NAME')))
   const argv =
     os === 'darwin'
       ? ['defaults', 'read', '-g', 'AppleInterfaceStyle']
-      : os === 'win32'
-        ? ['reg', 'query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize', '/v', 'AppsUseLightTheme']
+      : windows
+        ? [os === 'win32' ? 'reg' : 'reg.exe', 'query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize', '/v', 'AppsUseLightTheme']
         : ['gsettings', 'get', 'org.gnome.desktop.interface', 'color-scheme']
   try {
     const run = await $.process.run(argv, { timeoutMs: 3_000 })
     if (os === 'darwin') return /dark/i.test(run.stdout) ? 'dark' : 'light'
     if (run.exitCode !== 0 || !run.stdout.trim()) return 'dark'
-    return os === 'win32' ? (/0x1\b/.test(run.stdout) ? 'light' : 'dark') : /dark/.test(run.stdout) ? 'dark' : 'light'
+    return windows ? (/0x1\b/.test(run.stdout) ? 'light' : 'dark') : /dark/.test(run.stdout) ? 'dark' : 'light'
   } catch {
     return 'dark'
   }
@@ -177,7 +181,7 @@ async function readPrefs($: EngineInterface): Promise<void> {
   if (light !== was.light || still !== was.still) $.ui.invalidate('ui.render')
 }
 
-// The engine does not raise a plugin's own $.ui.open/close to its hooks: those call sites report here too.
+// Pane open state: set where this plugin opens the pane, by ui.close, and by a render (a pane the host restored raises no open).
 function paneShown($: EngineInterface, open: boolean): void {
   const reopened = open && !paneOpen
   paneOpen = open
@@ -356,10 +360,15 @@ async function reset($: EngineInterface, root: string, focus = false): Promise<v
 const titleOf = (root: string) => `Files: ${root.split('/').pop() || root}`
 
 // Auto-open: only on a real file change, and never re-open a pane that is already showing.
+// Never throws, so the caller still refreshes the tree; a pane left unplaced (too narrow) is opened again on the next change.
 async function showOnChange($: EngineInterface): Promise<void> {
   if (paneOpen || noDock) return
-  await $.ui.open({ id: PANE, title: titleOf((await get($)).root) })
-  paneShown($, true)
+  paneOpen = true
+  const opened = await get($)
+    .then(t => $.ui.open({ id: PANE, title: titleOf(t.root) }))
+    .catch(() => null)
+  paneOpen = false
+  if (opened?.isPlaced) paneShown($, true)
 }
 
 async function revealPaths($: EngineInterface, paths: string[]): Promise<void> {
@@ -821,13 +830,13 @@ async function afterBash($: EngineInterface, jobs: Job[]): Promise<void> {
     const blind = installed ? Object.keys(fresh.dirSizes).filter(d => underAny(d, ignored, t.root) || relative(t.root, d).split('/').some(s => PRUNE.includes(s))) : []
     await staleSizes($, capped || found.hits.length + found.gone.length === 0 ? undefined : [...found.hits, ...found.gone, ...blind])
     const hits = found.hits.filter(x => inside(t.root, x) && !underAny(x, ignored, t.root)).slice(0, FIND_LIMIT)
-    if (hits.length || found.gone.length) await showOnChange($)
     await revealPaths($, hits)
     const loaded = await get($)
     const dirs = [...new Set([loaded.root, ...openDirs(loaded), ...hits.map(dirname), ...found.gone.map(dirname)])].filter(d => inside(loaded.root, d))
     const listed = await loadDirs($, dirs)
     if (!fresh.top && since.os === 'win32')
       for (const kids of listed.values()) for (const n of kids) if (n.mtime > since.ms && hits.length < FIND_LIMIT) hits.push(n.id)
+    if (hits.length || found.gone.length) await showOnChange($)
     await patch($, cur => {
       const ids = new Set(cur.nodes.map(n => n.id))
       return { expanded: cur.expanded.filter(id => ids.has(id)) }
@@ -896,7 +905,6 @@ async function touched($: EngineInterface, paths: string[], tone: string, show: 
   const within = paths.map(posix).filter(p => inside(t.root, p))
   if (within.length === 0) return
   if (tone !== 'purple') {
-    await showOnChange($)
     searchIndex = null
     await staleSizes($, within)
     await revealPaths($, within.map(dirname))
@@ -904,6 +912,7 @@ async function touched($: EngineInterface, paths: string[], tone: string, show: 
     await refreshGit($)
   } else await revealPaths($, within)
   if (!show) return
+  if (tone !== 'purple') await showOnChange($)
   const tones: Record<string, string> = {}
   const kinds: Record<string, string> = {}
   for (const p of within) {
@@ -1052,19 +1061,30 @@ async function openNode($: EngineInterface, n: FileNode): Promise<void> {
   } else await openFile($, n.id)
 }
 
-async function loadTheme($: EngineInterface): Promise<void> {
-  const path = `${(await $.env.get('HOME')) ?? ''}/${THEME_FILE}`
+// Returns whether the theme file exists; a stat skips an unchanged one.
+async function loadTheme($: EngineInterface): Promise<boolean> {
   try {
-    const stat = await $.fs.stat(path)
+    const stat = await $.fs.stat(themePath)
     if (stat.kind !== 'file') throw new Error('no theme file')
-    if (stat.mtimeMs === themeMtime) return
-    await $.state.set(THEME, parseTheme(String(await $.fs.read(path))))
+    if (stat.mtimeMs === themeMtime) return true
+    const theme = parseTheme(String(await $.fs.read(themePath)))
+    omarchy = theme !== null
+    await $.state.set(THEME, theme ?? DEFAULT_THEME)
     themeMtime = stat.mtimeMs
+    return true
   } catch {
-    if (themeMtime === 0) return
+    if (themeMtime === 0) return false
+    omarchy = false
     await $.state.set(THEME, DEFAULT_THEME)
     themeMtime = 0
+    return false
   }
+}
+
+// A present theme is polled every 2s to follow switches; a missing one every minute, so one set up later is still picked up.
+async function watchTheme($: EngineInterface): Promise<void> {
+  const found = await loadTheme($)
+  themePoll = $.clock.after(found ? THEME_POLL_MS : THEME_MISSING_POLL_MS, () => void watchTheme($))
 }
 
 function shortPath(path: string): string {
@@ -1093,10 +1113,9 @@ export const register: Register = (on, options) => {
         noNerd = true
       }
       await readPrefs($)
-      await loadTheme($)
       themePoll?.cancel()
-      // Polled even when missing, so a theme set mid-session is picked up; a stat skips an unchanged file.
-      themePoll = $.clock.every(THEME_POLL_MS, () => void loadTheme($))
+      themePath = `${home}/${THEME_FILE}`
+      await watchTheme($)
       const t = await get($)
       marks.clear()
       if (t.flashOn) await patch($, () => ({ flash: [], flashDim: [], flashOn: false, flashTones: {} }))
@@ -1111,19 +1130,13 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     if (result.deny === undefined && (e.key === 'theme' || e.key === 'reduceMotion')) await readPrefs($)
     return result
-  }).catch(($, e, next) => next(e))
-
-  on('ui.open', { id: PANE }, async ($, e, next) => {
-    const result = await next(e)
-    paneShown($, true)
-    return result
-  }).catch(($, e, next) => next(e))
+  }).catch(($, e, next) => (next.called ? next(e) : undefined))
 
   on('ui.close', { id: PANE }, async ($, e, next) => {
     const result = await next(e)
     paneShown($, false)
     return result
-  }).catch(($, e, next) => next(e))
+  }).catch(($, e, next) => (next.called ? next(e) : undefined))
 
   on('command.run', { command: 'filetree' }, async ($, e) => {
     if (!e.presentation.isFullscreen) return { text: 'filetree shows in the sidebar, which needs the fullscreen layout. Run /tui fullscreen, then /filetree.' }
@@ -1327,7 +1340,9 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button, Input, Client } = $.ui.resolve(e)
     const t = await get($)
     const mode = light ? 'light' : 'dark'
-    const theme: Theme = themeMtime ? ((await $.state.get(THEME)).value ?? DEFAULT_THEME) : light ? LIGHT_THEME : DEFAULT_THEME
+    // Read even when unused, so a theme that turns up later redraws the pane.
+    const saved = (await $.state.get(THEME)).value
+    const theme: Theme = (omarchy && saved) || (light ? LIGHT_THEME : DEFAULT_THEME)
     const tones = light ? LIGHT_TONES : TONES
     const gitc = GIT_COLOR[mode]
     const now = await $.clock.now()
