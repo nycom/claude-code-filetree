@@ -77,6 +77,7 @@ let themeEpoch = 0
 let appearancePoll: Timer | null = null
 let autoTheme = false
 let paneOpen = false
+let opening = false
 let themeMtime: number | null = null
 let themePath = ''
 let omarchy = false
@@ -378,13 +379,15 @@ const titleOf = (root: string) => `Files: ${root.split('/').pop() || root}`
 
 // Auto-open: only on a real file change, and never re-open a pane that is already showing.
 // Never throws, so the caller still refreshes the tree; a pane left unplaced (too narrow) is opened again on the next change.
+// Asks the engine's pane record, not paneOpen: the desktop app can draw a Pane the engine never opened (its own tab restore).
 async function showOnChange($: EngineInterface): Promise<void> {
-  if (paneOpen || noDock) return
-  paneOpen = true
-  const opened = await get($)
-    .then(t => $.ui.open({ id: PANE, title: titleOf(t.root) }))
+  if (opening || noDock) return
+  opening = true
+  const opened = await $.ui
+    .panes()
+    .then(async panes => (panes.some(p => p.id === PANE && p.isPlaced) ? null : $.ui.open({ id: PANE, title: titleOf((await get($)).root) })))
     .catch(() => null)
-  paneOpen = false
+  opening = false
   if (opened?.isPlaced) paneShown($, true)
 }
 
@@ -1167,8 +1170,11 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => (next.called ? next(e) : undefined))
 
   on('command.run', { command: 'filetree' }, async ($, e) => {
-    if (!e.presentation.isFullscreen) return { text: 'filetree shows in the sidebar, which needs the fullscreen layout. Run /tui fullscreen, then /filetree.' }
-    if (e.presentation.columns < 110) return { text: 'filetree shows in the sidebar, which needs a terminal at least 110 columns wide. Widen it, then run /filetree.' }
+    // The layout and width are the terminal's; the desktop app runs the engine headless and docks the pane itself.
+    if ((await $.session.surfaces()).includes('terminal')) {
+      if (!e.presentation.isFullscreen) return { text: 'filetree shows in the sidebar, which needs the fullscreen layout. Run /tui fullscreen, then /filetree.' }
+      if (e.presentation.columns < 110) return { text: 'filetree shows in the sidebar, which needs a terminal at least 110 columns wide. Widen it, then run /filetree.' }
+    }
     noDock = false
     const arg = (e.args ?? '').trim()
     const cwd = await cwdOf($)

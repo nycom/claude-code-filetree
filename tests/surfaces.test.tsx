@@ -25,6 +25,7 @@ type World = {
   mtimes?: Record<string, number>
   openFails?: boolean
   unplaced?: boolean
+  surfaces?: string[]
 }
 type Ran = string[][]
 const opens: unknown[] = []
@@ -38,11 +39,15 @@ function world(on: any, w: World, ran: Ran) {
   on('session.cwd', () => ({ value: w.cwd }))
   on('session.id', () => ({ value: 'test-session' }))
   on('command.register', () => ({ value: undefined }))
+  const panes = new Map<string, boolean>()
   on('ui.open', (_$: any, e: any) => {
     opens.push(e)
     if (w.openFails) throw new Error('no room for the pane')
-    return { value: { isPlaced: !w.unplaced } }
+    panes.set(e.id, panes.get(e.id) || !w.unplaced)
+    return { value: { isPlaced: panes.get(e.id) } }
   })
+  on('ui.panes', () => ({ value: [...panes].map(([id, isPlaced]) => ({ id, title: id, isShown: true, isFocused: false, isPlaced })) }))
+  on('session.surfaces', () => ({ value: w.surfaces ?? ['terminal'] }))
   on('ui.toast', (_$: any, e: any) => {
     ran.push(['toast', String(e.text ?? e.message ?? JSON.stringify(e))])
     return { value: undefined }
@@ -1134,6 +1139,52 @@ test('auto-open: a pane the host leaves unplaced is not treated as open; each ch
   await clock.advance(120_000)
   await clock.settle()
   expect(probes()).toBe(before)
+})
+
+test('desktop app: /filetree opens the pane though the headless engine reports no fullscreen layout', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k'
+  const clock = world(on, { os: 'darwin', env: { HOME: '/Users/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '', surfaces: ['desktop'] }, ran)
+  await $.session.start({ cwd: root, surface: null, isInteractive: false } as any)
+  await clock.settle()
+  const start = opens.length
+  const r = await $.command.run({ command: 'filetree', args: '', origin: { kind: 'sdk' }, presentation: { isFullscreen: false, columns: 80 } } as any)
+  await clock.settle()
+  expect(JSON.stringify(r)).not.toContain('/tui fullscreen')
+  expect(opens.slice(start)).toEqual([{ id: 'filetree', title: 'Files: k', focus: true }])
+})
+
+test('terminal main screen: /filetree still refuses and opens nothing', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '', surfaces: ['terminal', 'desktop'] }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const start = opens.length
+  const narrow = await $.command.run({ command: 'filetree', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 100 } } as any)
+  const main = await $.command.run({ command: 'filetree', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 200 } } as any)
+  await clock.settle()
+  expect(JSON.stringify(narrow)).toContain('110 columns')
+  expect(JSON.stringify(main)).toContain('/tui fullscreen')
+  expect(opens.length).toBe(start)
+})
+
+test('desktop app: a pane the app redraws before any open does not stop the first write opening it, once', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k'
+  const clock = world(on, { os: 'darwin', env: { HOME: '/Users/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '', surfaces: ['desktop'] }, ran)
+  await $.session.start({ cwd: root, surface: null, isInteractive: false } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'desktop', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  const start = opens.length
+  await $.tool.call({ tool: 'Write', file_path: `${root}/mock.txt`, content: 'x' } as any)
+  await clock.settle()
+  expect(opens.slice(start)).toEqual([{ id: 'filetree', title: 'Files: k' }])
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/mock.txt`, old_string: 'x', new_string: 'y' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start + 1)
+  await ui.unmount()
 })
 
 test('auto-open: three concurrent edits open the pane once', { timeoutMs: 20_000 }, async ($, on) => {
