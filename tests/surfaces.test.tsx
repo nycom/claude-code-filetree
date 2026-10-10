@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
+import { onTerminal, panePlaced } from '../hooks/register'
 import { ancestorsOf, cells, formatSize, isLight, middle, parseTheme, replaceChildren, stamp, toNodes } from '../hooks/tree'
 
 type World = {
@@ -21,12 +22,17 @@ type World = {
   duDelays?: number[]
   links?: string[]
   appearance?: string
+  appearanceDelays?: number[]
   mtimes?: Record<string, number>
   openFails?: boolean
   unplaced?: boolean
+  surfaces?: string[]
+  panesFail?: boolean
+  surfacesFail?: boolean
 }
 type Ran = string[][]
 const opens: unknown[] = []
+const closes: unknown[] = []
 const envs: Record<string, string>[] = []
 
 function world(on: any, w: World, ran: Ran) {
@@ -37,10 +43,25 @@ function world(on: any, w: World, ran: Ran) {
   on('session.cwd', () => ({ value: w.cwd }))
   on('session.id', () => ({ value: 'test-session' }))
   on('command.register', () => ({ value: undefined }))
+  const panes = new Map<string, boolean>()
   on('ui.open', (_$: any, e: any) => {
     opens.push(e)
     if (w.openFails) throw new Error('no room for the pane')
-    return { value: { isPlaced: !w.unplaced } }
+    panes.set(e.id, panes.get(e.id) || !w.unplaced)
+    return { value: { isPlaced: panes.get(e.id) } }
+  })
+  on('ui.panes', () => {
+    if (w.panesFail) throw new Error('unknown method')
+    return { value: [...panes].map(([id, isPlaced]) => ({ id, title: id, isShown: true, isFocused: false, isPlaced })) }
+  })
+  on('ui.close', (_$: any, e: any) => {
+    closes.push(e)
+    panes.delete(e.id)
+    return { value: undefined }
+  })
+  on('session.surfaces', () => {
+    if (w.surfacesFail) throw new Error('unknown method')
+    return { value: w.surfaces ?? ['terminal'] }
   })
   on('ui.toast', (_$: any, e: any) => {
     ran.push(['toast', String(e.text ?? e.message ?? JSON.stringify(e))])
@@ -89,6 +110,10 @@ function world(on: any, w: World, ran: Ran) {
       const delay = w.duDelays?.shift()
       if (delay) await clock.sleep(delay)
       return ok(w.du?.[argv.at(-1) ?? ''] ?? '')
+    }
+    if (argv[0] === 'defaults' || argv[0] === 'reg.exe') {
+      const delay = w.appearanceDelays?.shift()
+      if (delay) await clock.sleep(delay)
     }
     if (argv[0] === 'defaults') return w.appearance ? ok(w.appearance) : { value: { exitCode: 1, stdout: '', stderr: 'does not exist', isStdoutTruncated: false, isStderrTruncated: false } }
     if (argv[0] === 'reg.exe') return ok(w.appearance ?? '')
@@ -415,11 +440,7 @@ test('sidebar only: no pane in the default layout, and an inline pane closes its
   const root = '/home/k/proj'
   const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '' }, ran)
   const opened = opens
-  const closed: unknown[] = []
-  on('ui.close', (_$: any, e: any) => {
-    closed.push(e)
-    return { value: undefined }
-  })
+  const closed = closes.length
   await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
   await clock.settle()
   const before = opened.length
@@ -428,7 +449,7 @@ test('sidebar only: no pane in the default layout, and an inline pane closes its
   expect(opened.length).toBe(before)
   const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: { ...paneProps(60), placement: 'inline' } })
   await clock.settle()
-  expect(closed.length).toBeGreaterThan(0)
+  expect(closes.length).toBeGreaterThan(closed)
   await ui.unmount()
 })
 
@@ -1057,7 +1078,6 @@ test('auto-open: an inline pane is never opened by a write', { timeoutMs: 20_000
   const ran: Ran = []
   const root = '/home/k/proj'
   const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '' }, ran)
-  on('ui.close', () => ({ value: undefined }))
   await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
   await clock.settle()
   const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: { ...paneProps(60), placement: 'inline' } })
@@ -1131,6 +1151,72 @@ test('auto-open: a pane the host leaves unplaced is not treated as open; each ch
   expect(probes()).toBe(before)
 })
 
+test('desktop app: /filetree opens the pane though the headless engine reports no fullscreen layout', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k'
+  const clock = world(on, { os: 'darwin', env: { HOME: '/Users/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '', surfaces: ['desktop'] }, ran)
+  await $.session.start({ cwd: root, surface: null, isInteractive: false } as any)
+  await clock.settle()
+  const start = opens.length
+  const r = await $.command.run({ command: 'filetree', args: '', origin: { kind: 'sdk' }, presentation: { isFullscreen: false, columns: 80 } } as any)
+  await clock.settle()
+  expect(JSON.stringify(r)).not.toContain('/tui fullscreen')
+  expect(opens.slice(start)).toEqual([{ id: 'filetree', title: 'Files: k', focus: true }])
+})
+
+test('terminal main screen: /filetree still refuses and opens nothing', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '', surfaces: ['terminal', 'desktop'] }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const start = opens.length
+  const narrow = await $.command.run({ command: 'filetree', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 100 } } as any)
+  const main = await $.command.run({ command: 'filetree', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 200 } } as any)
+  await clock.settle()
+  expect(JSON.stringify(narrow)).toContain('110 columns')
+  expect(JSON.stringify(main)).toContain('/tui fullscreen')
+  expect(opens.length).toBe(start)
+})
+
+test('desktop app: a pane the app redraws before any open does not stop the first write opening it, once', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k'
+  const clock = world(on, { os: 'darwin', env: { HOME: '/Users/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '', surfaces: ['desktop'] }, ran)
+  await $.session.start({ cwd: root, surface: null, isInteractive: false } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'desktop', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  const start = opens.length
+  await $.tool.call({ tool: 'Write', file_path: `${root}/mock.txt`, content: 'x' } as any)
+  await clock.settle()
+  expect(opens.slice(start)).toEqual([{ id: 'filetree', title: 'Files: k' }])
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/mock.txt`, old_string: 'x', new_string: 'y' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start + 1)
+  await ui.unmount()
+})
+
+test('desktop app: a pane the app redraws before any open is not opened by a cwd change', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k'
+  const sub = `${root}/sub`
+  const w: World = { os: 'darwin', env: { HOME: '/Users/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file'], ['sub', 'dir']], [sub]: [['b.txt', 'file']] }, status: '', numstat: '', surfaces: ['desktop'] }
+  const clock = world(on, w, ran)
+  on('classic.CwdChanged', () => ({}))
+  await $.session.start({ cwd: root, surface: null, isInteractive: false } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'desktop', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  const start = opens.length
+  w.cwd = sub
+  await $.classic.CwdChanged({ old_cwd: root, new_cwd: sub } as any)
+  await clock.settle()
+  expect(await texts(ui)).toContain('b.txt')
+  expect(opens.length).toBe(start)
+  await ui.unmount()
+})
+
 test('auto-open: three concurrent edits open the pane once', { timeoutMs: 20_000 }, async ($, on) => {
   const ran: Ran = []
   const root = '/home/k/proj'
@@ -1141,6 +1227,72 @@ test('auto-open: three concurrent edits open the pane once', { timeoutMs: 20_000
   await Promise.all([1, 2, 3].map(i => $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'a', new_string: `b${i}` } as any)))
   await clock.settle()
   expect(opens.length).toBe(start + 1)
+})
+
+// Stands in for the person's close of the pane: raises ui.close for its id.
+const closer = {
+  name: 'closer',
+  register(on: any) {
+    on('command.run', { command: 'close-pane' }, async ($: any) => {
+      await $.ui.close({ id: 'filetree' })
+      return { text: '' }
+    })
+  },
+}
+
+test('auto-open: close the pane, then the next file change re-opens it once', { plugins: [closer], timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '' }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const start = opens.length
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'a', new_string: 'b' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start + 1)
+  await $.command.run({ command: 'close-pane', args: '', origin: { kind: 'person' }, presentation: { isFullscreen: true, columns: 200 } } as any)
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'b', new_string: 'c' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start + 2)
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'c', new_string: 'd' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start + 2)
+})
+
+test('an engine without $.ui.panes or $.session.surfaces: the pane falls back to its own open flag and the terminal checks still apply', async () => {
+  expect(await panePlaced({ ui: {} } as any)).toBe(false)
+  expect(await panePlaced({ ui: { panes: () => Promise.reject(new Error('unknown method')) } } as any)).toBe(false)
+  expect(await onTerminal({ session: {} } as any)).toBe(true)
+  expect(await onTerminal({ session: { surfaces: () => Promise.reject(new Error('unknown method')) } } as any)).toBe(true)
+  expect(await onTerminal({ session: { surfaces: async () => ['desktop'] } } as any)).toBe(false)
+})
+
+test('auto-open: when $.ui.panes refuses, a write opens the pane once and the hook never throws', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '', panesFail: true }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const start = opens.length
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'a', new_string: 'b' } as any)
+  await clock.settle()
+  await $.tool.call({ tool: 'Write', file_path: `${root}/a.txt`, content: 'c' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start + 1)
+})
+
+test('when $.session.surfaces refuses, /filetree still applies the terminal checks', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '', surfacesFail: true }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const start = opens.length
+  const main = await $.command.run({ command: 'filetree', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 200 } } as any)
+  await clock.settle()
+  expect(JSON.stringify(main)).toContain('/tui fullscreen')
+  expect(opens.length).toBe(start)
 })
 
 test('theme auto under WSL follows the Windows appearance through reg.exe', { timeoutMs: 20_000 }, async ($, on) => {
@@ -1168,5 +1320,327 @@ test('an Omarchy light theme leaves the palette to Claude Code; dim text takes d
   const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
   await clock.settle()
   expect(await texts(ui)).not.toContain('"backgroundColor":"#')
+  await ui.unmount()
+})
+
+// Stands in for the skins mod: `/skin <json>` publishes its resolved theme as skins does.
+const skins = {
+  name: 'skins',
+  register(on: any) {
+    on('command.run', { command: 'skin' }, async ($: any, e: any) => {
+      await $.state.set({ plugin: 'skins', key: 'theme' }, JSON.parse(e.args))
+      return { text: '' }
+    })
+  },
+}
+const skin = (theme: unknown) => ({ command: 'skin', args: JSON.stringify(theme), origin: { kind: 'person' }, presentation: { isFullscreen: true, columns: 200 } }) as any
+const DRACULA = { mode: 'dark', accent: '#ff79c6', foreground: '#f8f8f2', dim: '#bd93f9', red: '#ff5555', selection: '#44475a', background: '#282a36' }
+const NORD = { mode: 'dark', accent: '#88c0d0', foreground: '#eceff4', dim: '#d8dee9', red: '#bf616a', selection: '#434c5e', background: '#2e3440' }
+const DAWN = { mode: 'light', accent: '#a3206c', foreground: '#1f1f1f', dim: '#6b6b6b', red: '#b3261e', selection: '#e8c8da', background: '#ffffff' }
+const OMARCHY = 'accent = "#7aa2f7"\nforeground = "#c0caf5"\nselection = "#33467c"\nbackground = "#1a1b26"\n'
+
+test('the skin chosen in the skins mod colours the pane over the Omarchy theme, on the terminal\'s background, and redraws it on /skin', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', theme: { toml: OMARCHY, mtimeMs: 1 } }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await $.command.run(skin(DRACULA))
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  let shown = await texts(ui)
+  for (const c of ['"activeBg":"#44475a"', '"fg":"#f8f8f2"', '#ff79c6', '#bd93f9']) expect(shown).toContain(c)
+  for (const c of ['"backgroundColor":"#', '#1a1b26', '#33467c', '#c0caf5', '#7aa2f7']) expect(shown).not.toContain(c)
+  await $.command.run(skin(NORD))
+  await clock.settle()
+  shown = await texts(ui)
+  for (const c of ['"activeBg":"#434c5e"', '"fg":"#eceff4"', '#88c0d0', '#d8dee9']) expect(shown).toContain(c)
+  for (const c of ['"backgroundColor":"#', '#44475a', '#f8f8f2', '#ff79c6']) expect(shown).not.toContain(c)
+  await ui.unmount()
+})
+
+// Tones and git colours the git world below draws: a purple tone, M and ?.
+const DARK_GIT = ['"#c186f9"', '"#e5c07b"', '"#98c379"']
+const LIGHT_GIT = ['"#820bf4"', '"#866100"', '"#2b753f"']
+const gitWorld = (root: string) => ({ os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: root, dirs: { [root]: [['a.ts', 'file'], ['b.ts', 'file']] }, status: '## main\0 M a.ts\0?? b.ts\0', numstat: '' }) as World
+
+test('with skins off the pane keeps the Omarchy theme; a light skin draws its own colours on the host background, with light tones and git colours', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { ...gitWorld(root), theme: { toml: OMARCHY, mtimeMs: 1 } }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await $.command.run(skin(DRACULA))
+  await $.command.run(skin(null))
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  const omarchy = ['"backgroundColor":"#1a1b26"', '"activeBg":"#33467c"', '"fg":"#c0caf5"', '#7aa2f7']
+  let shown = await texts(ui)
+  for (const c of [...omarchy, ...DARK_GIT]) expect(shown).toContain(c)
+  expect(shown).not.toContain('#282a36')
+  await $.command.run(skin(DAWN))
+  await clock.settle()
+  shown = await texts(ui)
+  for (const c of [...LIGHT_GIT, '"activeBg":"#e8c8da"', '"fg":"#1f1f1f"', '#a3206c', '#6b6b6b']) expect(shown).toContain(c)
+  for (const c of ['#1a1b26', '#33467c', '#c0caf5', '#7aa2f7', '"backgroundColor":"#', ...DARK_GIT]) expect(shown).not.toContain(c)
+  await ui.unmount()
+})
+
+test('a skins version that publishes no theme leaves the pane on its own light or dark detection under theme auto', { plugins: [{ name: 'skins', register(on: any) { on('command.run', { command: 'skin' }, () => ({ text: '' })) } }], timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k/proj'
+  const clock = world(on, { os: 'darwin', env: { HOME: '/Users/k', TMPDIR: '/tmp/' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', appearance: '' }, ran)
+  on('config.list', () => themeSetting('auto'))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await $.command.run(skin(DRACULA))
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  const shown = await texts(ui)
+  expect(shown).toContain('"activeBg":"#9ca3af","hoverBg":"#e7e8e7"')
+  expect(shown).not.toContain('#44475a')
+  expect(ran.some(a => a[0] === 'defaults')).toBe(true)
+  await ui.unmount()
+})
+
+test('without the skins mod installed the pane draws the Omarchy theme', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', theme: { toml: OMARCHY, mtimeMs: 1 } }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  const shown = await texts(ui)
+  for (const c of ['"backgroundColor":"#1a1b26"', '"activeBg":"#33467c"', '"fg":"#c0caf5"', '#7aa2f7']) expect(shown).toContain(c)
+  expect(ran.some(a => a[0] === 'toast')).toBe(false)
+  await ui.unmount()
+})
+
+const themeSetting = (value: string) => ({ value: [{ key: 'theme', label: 'Theme', kind: 'choice', value, provider: { plugin: 'engine', tier: 'core' }, isLocked: false }] })
+
+for (const [claude, mode] of [['light', 'dark'], ['dark', 'light']] as const) {
+  test(`a ${mode} skin under Claude Code's ${claude} theme draws ${mode} tones and git colours`, { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+    const ran: Ran = []
+    const root = '/home/k/proj'
+    const clock = world(on, gitWorld(root), ran)
+    on('config.list', () => themeSetting(claude))
+    await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+    const theme = mode === 'dark' ? DRACULA : DAWN
+    await $.command.run(skin(theme))
+    await clock.settle()
+    const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+    await clock.settle()
+    const shown = await texts(ui)
+    for (const c of [...(mode === 'dark' ? DARK_GIT : LIGHT_GIT), `"activeBg":"${theme.selection}"`]) expect(shown).toContain(c)
+    for (const c of mode === 'dark' ? LIGHT_GIT : DARK_GIT) expect(shown).not.toContain(c)
+    await ui.unmount()
+  })
+}
+
+test('theme auto with a skin on asks the OS nothing; with the skin off the appearance poll is back', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k/proj'
+  const clock = world(on, { os: 'darwin', env: { HOME: '/Users/k', TMPDIR: '/tmp/' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', appearance: '' }, ran)
+  on('config.list', () => themeSetting('auto'))
+  const probes = () => ran.filter(a => a[0] === 'defaults').length
+  await $.command.run(skin(DRACULA))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  await clock.advance(180_000)
+  await clock.settle()
+  expect(await texts(ui)).toContain('"activeBg":"#44475a"')
+  expect(probes()).toBe(0)
+  await $.command.run(skin(null))
+  await clock.settle()
+  expect(await texts(ui)).toContain('"activeBg":"#9ca3af"')
+  const off = probes()
+  expect(off).toBeGreaterThan(0)
+  await clock.advance(60_000)
+  await clock.settle()
+  expect(probes()).toBeGreaterThan(off)
+  await $.command.run(skin(NORD))
+  await clock.settle()
+  const on2 = probes()
+  await clock.advance(180_000)
+  await clock.settle()
+  expect(probes()).toBe(on2)
+  expect(await texts(ui)).toContain('"activeBg":"#434c5e"')
+  await ui.unmount()
+})
+
+test('turning a skin off under theme auto does not hold up the write while the OS is asked; the pane keeps the skin\'s mode meanwhile', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k/proj'
+  const w: World = { os: 'darwin', env: { HOME: '/Users/k', TMPDIR: '/tmp/' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', appearance: '' }
+  const clock = world(on, w, ran)
+  on('config.list', () => themeSetting('auto'))
+  await $.command.run(skin(DAWN))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  expect(await texts(ui)).toContain('"activeBg":"#e8c8da"')
+  w.appearanceDelays = [5_000]
+  let written = false
+  const off = $.command.run(skin(null)).then(() => (written = true))
+  await clock.settle()
+  expect(written).toBe(true)
+  expect(await texts(ui)).toContain('"activeBg":"#9ca3af"')
+  await clock.advance(5_000)
+  await off
+  await clock.settle()
+  expect(await texts(ui)).toContain('"activeBg":"#9ca3af"')
+  await ui.unmount()
+})
+
+test('a skin going on while the appearance poll is mid-read leaves the poll stopped', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k/proj'
+  const clock = world(on, { os: 'darwin', env: { HOME: '/Users/k', TMPDIR: '/tmp/' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', appearance: '' }, ran)
+  let reads = 0
+  on('config.list', () => {
+    reads++
+    return themeSetting('auto')
+  })
+  // Holds one read of the skins theme, returning what it read before the hold.
+  let hold = 0
+  on('state.get', { plugin: 'skins', key: 'theme' }, async ($: any, e: any, next: any) => {
+    const read = await next(e)
+    const ms = hold
+    hold = 0
+    if (ms) await clock.sleep(ms)
+    return read
+  })
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  hold = 5_000
+  await clock.advance(60_000)
+  await $.command.run(skin(DAWN))
+  await clock.settle()
+  await clock.advance(5_000)
+  await clock.settle()
+  const on1 = reads
+  await clock.advance(180_000)
+  await clock.settle()
+  expect(reads).toBe(on1)
+  await ui.unmount()
+})
+
+test('a skin turned off, on and switched in quick succession ends on the last skin, whatever the OS answers late', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k/proj'
+  const w: World = { ...gitWorld(root), os: 'darwin', env: { HOME: '/Users/k', TMPDIR: '/tmp/' }, appearance: '' }
+  const clock = world(on, w, ran)
+  on('config.list', () => themeSetting('auto'))
+  const probes = () => ran.filter(a => a[0] === 'defaults').length
+  await $.command.run(skin(DRACULA))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  w.appearanceDelays = [5_000]
+  await $.command.run(skin(null))
+  await clock.settle()
+  await $.command.run(skin(DAWN))
+  await $.command.run(skin(NORD))
+  await clock.settle()
+  await clock.advance(5_000)
+  await clock.settle()
+  const shown = await texts(ui)
+  for (const c of [...DARK_GIT, '"activeBg":"#434c5e"', '"fg":"#eceff4"']) expect(shown).toContain(c)
+  for (const c of [...LIGHT_GIT, '#9ca3af', '#e8c8da', '#44475a']) expect(shown).not.toContain(c)
+  const seen = probes()
+  await clock.advance(180_000)
+  await clock.settle()
+  expect(probes()).toBe(seen)
+  await ui.unmount()
+})
+
+// Holds the next config read, so the frame drawn before the pane's own prefs settle can be checked.
+function heldTheme(on: any, clock: any, value: string) {
+  const held = { ms: 0 }
+  on('config.list', async () => {
+    const ms = held.ms
+    held.ms = 0
+    if (ms) await clock.sleep(ms)
+    return themeSetting(value)
+  })
+  return held
+}
+
+test('a skin going on under theme auto draws in the first frame, before the pane re-reads its settings', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k/proj'
+  const clock = world(on, { ...gitWorld(root), os: 'darwin', env: { HOME: '/Users/k', TMPDIR: '/tmp/' }, appearance: '' }, ran)
+  const held = heldTheme(on, clock, 'auto')
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  expect(await texts(ui)).toContain(LIGHT_GIT[0])
+  held.ms = 5_000
+  await $.command.run(skin(DRACULA))
+  await clock.settle()
+  for (const c of [...DARK_GIT, '"activeBg":"#44475a"']) expect(await texts(ui)).toContain(c)
+  await clock.advance(5_000)
+  await clock.settle()
+  for (const c of [...DARK_GIT, '"activeBg":"#44475a"']) expect(await texts(ui)).toContain(c)
+  await ui.unmount()
+})
+
+test('a skin going off under a fixed theme of the other mode draws that theme in the first frame', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, gitWorld(root), ran)
+  const held = heldTheme(on, clock, 'light')
+  await $.command.run(skin(DRACULA))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  expect(await texts(ui)).toContain(DARK_GIT[0])
+  held.ms = 5_000
+  await $.command.run(skin(null))
+  await clock.settle()
+  let shown = await texts(ui)
+  for (const c of LIGHT_GIT) expect(shown).toContain(c)
+  for (const c of [...DARK_GIT, '#44475a']) expect(shown).not.toContain(c)
+  await clock.advance(5_000)
+  await clock.settle()
+  shown = await texts(ui)
+  for (const c of LIGHT_GIT) expect(shown).toContain(c)
+  await ui.unmount()
+})
+
+const WSL_LIGHT = (root: string) => ({ ...gitWorld(root), env: { HOME: '/home/k', WSL_DISTRO_NAME: 'Ubuntu' }, appearance: '    AppsUseLightTheme    REG_DWORD    0x1\n' }) as World
+
+test('theme auto under WSL with a skin on still follows Windows through reg.exe, which skins cannot read; a skin of the other mode is left out', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, WSL_LIGHT(root), ran)
+  on('config.list', () => themeSetting('auto'))
+  const probes = () => ran.filter(a => a[0] === 'reg.exe').length
+  await $.command.run(skin(DRACULA))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  let shown = await texts(ui)
+  for (const c of [...LIGHT_GIT, '"activeBg":"#9ca3af"']) expect(shown).toContain(c)
+  for (const c of [...DARK_GIT, '#44475a', '#f8f8f2']) expect(shown).not.toContain(c)
+  const seen = probes()
+  expect(seen).toBeGreaterThan(0)
+  await clock.advance(60_000)
+  await clock.settle()
+  expect(probes()).toBeGreaterThan(seen)
+  await $.command.run(skin(DAWN))
+  await clock.settle()
+  shown = await texts(ui)
+  for (const c of [...LIGHT_GIT, '"activeBg":"#e8c8da"', '"fg":"#1f1f1f"']) expect(shown).toContain(c)
   await ui.unmount()
 })

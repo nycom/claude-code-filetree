@@ -1,7 +1,7 @@
 import { type BuiltinToolResults, type EngineInterface, type Register, type Timer, update } from 'claude-code'
 import { openCommand } from './open'
 
-import type { Activity, FileNode, FileTree, Theme } from '../types'
+import type { Activity, FileNode, FileTree, PanelTheme, Theme } from '../types'
 import { BRANCH_ICON, chainOf, type GitAction, gitActions, LIGHT_TONES, readOnly, readTargets, resolve, TONES } from './git'
 import type { RowSpec, RowsProps, Seg } from './rows'
 import { CHEVRON_CLOSED, CHEVRON_OPEN, fileIcon, GIT_COLOR } from './icons'
@@ -37,6 +37,7 @@ import {
 
 const TREE = { plugin: 'filetree', key: 'tree' } as const
 const THEME = { plugin: 'filetree', key: 'theme' } as const
+const SKIN_THEME = { plugin: 'skins', key: 'theme' } as const
 const ACTIVITY = { plugin: 'filetree', key: 'activity' } as const
 const PANE = 'filetree'
 const BRANCH_ROW = '#branch'
@@ -76,6 +77,7 @@ let themeEpoch = 0
 let appearancePoll: Timer | null = null
 let autoTheme = false
 let paneOpen = false
+let opening = false
 let themeMtime: number | null = null
 let themePath = ''
 let omarchy = false
@@ -98,7 +100,11 @@ let pointer = true
 let view = { from: 0, max: 0 }
 let paneRoom = 0
 let sizeTick = false
+// Light or dark without a skin: Claude Code's theme, or under auto the OS's (a skin's while it stands in for the OS).
 let light = false
+// Theme auto on Windows or WSL: the pane asks the OS even under a skin, and leaves out a skin of the other mode.
+let winAuto = false
+let prefsRead = 0
 let still = false
 const marks = new Map<string, string>()
 let lastSync = 0
@@ -147,9 +153,15 @@ function faint(hex: string, base: string): string {
   return `#${[16, 8, 0].map(x => ch(x).toString(16).padStart(2, '0')).join('')}`
 }
 
+// Windows, or WSL on it: the appearance is in the Windows registry.
+async function onWindows($: EngineInterface): Promise<boolean> {
+  const os = await osName($)
+  return os === 'win32' || (os === 'linux' && Boolean(await $.env.get('WSL_DISTRO_NAME')))
+}
+
 async function appearance($: EngineInterface): Promise<'light' | 'dark'> {
   const os = await osName($)
-  const windows = os === 'win32' || (os === 'linux' && Boolean(await $.env.get('WSL_DISTRO_NAME')))
+  const windows = await onWindows($)
   const argv =
     os === 'darwin'
       ? ['defaults', 'read', '-g', 'AppleInterfaceStyle']
@@ -166,20 +178,33 @@ async function appearance($: EngineInterface): Promise<'light' | 'dark'> {
   }
 }
 
-async function readPrefs($: EngineInterface): Promise<void> {
-  const was = { light, still }
-  autoTheme = false
+// The skins write passes its own value in, so the pane never reads the skin it is being told about.
+async function readPrefs($: EngineInterface, skinSet?: { value?: PanelTheme | null }): Promise<void> {
+  const read = ++prefsRead
+  const was = { light, still, winAuto }
+  let auto = false
+  let isLit = false
+  let reduce = still
+  let theme: unknown
+  let windows = false
   try {
+    const skin = (skinSet ?? (await $.state.get(SKIN_THEME))).value
     const rows = await $.config.list()
-    const theme = rows.find(r => r.key === 'theme')?.value
-    autoTheme = theme === 'auto'
-    light = isLight(theme, autoTheme ? await appearance($) : 'dark')
-    still = rows.find(r => r.key === 'reduceMotion')?.value === true
-  } catch {
-    light = false
-  }
+    theme = rows.find(r => r.key === 'theme')?.value
+    windows = await onWindows($)
+    // Under theme auto a skin on in the skins mod says light or dark itself, so the OS is not asked; skins cannot ask Windows, so there the pane still does.
+    auto = theme === 'auto' && (!skin || windows)
+    isLit = isLight(theme, auto ? await appearance($) : (skin?.mode ?? 'dark'))
+    reduce = rows.find(r => r.key === 'reduceMotion')?.value === true
+  } catch {}
+  // A later read has started, so this one may have read a skins theme since replaced.
+  if (read !== prefsRead) return
+  autoTheme = auto
+  light = isLit
+  winAuto = theme === 'auto' && windows
+  still = reduce
   pollAppearance($)
-  if (light !== was.light || still !== was.still) $.ui.invalidate('ui.render')
+  if (light !== was.light || still !== was.still || winAuto !== was.winAuto) $.ui.invalidate('ui.render')
 }
 
 // Pane open state: set where this plugin opens the pane, by ui.close, and by a render (a pane the host restored raises no open).
@@ -349,7 +374,7 @@ async function reset($: EngineInterface, root: string, focus = false): Promise<v
   sizeQueue = []
   await put($, () => ({ ...emptyTree(root), showHidden: prev.showHidden, showSize: prev.root ? prev.showSize : sizeDefault }))
   // Only /filetree opens a closed pane here; an open one just takes the new root's title.
-  if (focus || (paneOpen && !noDock)) {
+  if (focus || (!noDock && (await panePlaced($)))) {
     await $.ui.open({ id: PANE, title: titleOf(root), ...(focus ? { focus: true } : {}) })
     paneShown($, true)
   }
@@ -360,15 +385,34 @@ async function reset($: EngineInterface, root: string, focus = false): Promise<v
 
 const titleOf = (root: string) => `Files: ${root.split('/').pop() || root}`
 
+// Asks the engine's pane record, not paneOpen: the desktop app can draw a Pane the engine never opened (its own tab restore).
+// An engine without $.ui.panes, or one that refuses it, falls back to paneOpen.
+export async function panePlaced($: EngineInterface): Promise<boolean> {
+  try {
+    return (await $.ui.panes()).some(p => p.id === PANE && p.isPlaced)
+  } catch {
+    return paneOpen
+  }
+}
+
+// Whether the session draws on a terminal; an engine without $.session.surfaces, or one that refuses it, counts as one.
+export async function onTerminal($: EngineInterface): Promise<boolean> {
+  try {
+    return (await $.session.surfaces()).includes('terminal')
+  } catch {
+    return true
+  }
+}
+
 // Auto-open: only on a real file change, and never re-open a pane that is already showing.
 // Never throws, so the caller still refreshes the tree; a pane left unplaced (too narrow) is opened again on the next change.
 async function showOnChange($: EngineInterface): Promise<void> {
-  if (paneOpen || noDock) return
-  paneOpen = true
-  const opened = await get($)
-    .then(t => $.ui.open({ id: PANE, title: titleOf(t.root) }))
+  if (opening || noDock) return
+  opening = true
+  const opened = await panePlaced($)
+    .then(async placed => (placed ? null : $.ui.open({ id: PANE, title: titleOf((await get($)).root) })))
     .catch(() => null)
-  paneOpen = false
+  opening = false
   if (opened?.isPlaced) paneShown($, true)
 }
 
@@ -1136,6 +1180,14 @@ export const register: Register = (on, options) => {
     return result
   }).catch(($, e, next) => (next.called ? next(e) : undefined))
 
+  // A skin going on or off in the skins mod starts or stops the appearance poll, drawn pane or not.
+  // Not awaited: skins' write is not held up by the OS check.
+  on('state.set', { plugin: 'skins', key: 'theme' }, async ($, e, next) => {
+    const result = await next(e)
+    if (result.deny === undefined) void readPrefs($, e)
+    return result
+  }).catch(($, e, next) => (next.called ? next(e) : undefined))
+
   on('ui.close', { id: PANE }, async ($, e, next) => {
     const result = await next(e)
     paneShown($, false)
@@ -1143,8 +1195,11 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => (next.called ? next(e) : undefined))
 
   on('command.run', { command: 'filetree' }, async ($, e) => {
-    if (!e.presentation.isFullscreen) return { text: 'filetree shows in the sidebar, which needs the fullscreen layout. Run /tui fullscreen, then /filetree.' }
-    if (e.presentation.columns < 110) return { text: 'filetree shows in the sidebar, which needs a terminal at least 110 columns wide. Widen it, then run /filetree.' }
+    // The layout and width are the terminal's; the desktop app runs the engine headless and docks the pane itself.
+    if (await onTerminal($)) {
+      if (!e.presentation.isFullscreen) return { text: 'filetree shows in the sidebar, which needs the fullscreen layout. Run /tui fullscreen, then /filetree.' }
+      if (e.presentation.columns < 110) return { text: 'filetree shows in the sidebar, which needs a terminal at least 110 columns wide. Widen it, then run /filetree.' }
+    }
     noDock = false
     const arg = (e.args ?? '').trim()
     const cwd = await cwdOf($)
@@ -1338,16 +1393,24 @@ export const register: Register = (on, options) => {
       const { Box: Empty } = $.ui.resolve(e)
       return <Empty />
     }
-    // A pane the host restored is open too, so showOnChange must not open it again.
+    // A pane the host drew is showing too, so its prefs are read and the appearance poll runs for it.
     if (!paneOpen) paneShown($, true)
     const unicode = glyphSetting === 'plain' || (glyphSetting === 'auto' && (noNerd || e.surface === 'desktop'))
     const { Box, Text, Button, Input, Client } = $.ui.resolve(e)
     const t = await get($)
-    const mode = light ? 'light' : 'dark'
+    // A skin on in the skins mod decides light or dark, unless the pane asks the OS itself (theme auto on Windows); then a skin of the other mode is left out.
+    // Decided here from the skin just read, so a skin going on or off draws right before readPrefs settles.
+    const own = light ? 'light' : 'dark'
+    const skin = (await $.state.get(SKIN_THEME)).value
+    const drawn = skin && (!winAuto || skin.mode === own) ? skin : null
+    const mode = drawn?.mode ?? own
     // Read even when unused, so a theme that turns up later redraws the pane.
     const saved = (await $.state.get(THEME)).value
-    const theme: Theme = (omarchy && saved) || (light ? LIGHT_THEME : DEFAULT_THEME)
-    const tones = light ? LIGHT_TONES : TONES
+    // A skin wins over Omarchy with its own colours, on the host's background as skins draws.
+    const theme: Theme = drawn
+      ? { fg: drawn.foreground, accent: drawn.accent, muted: drawn.dim, urgent: drawn.red, selection: drawn.selection, bg: '' }
+      : (omarchy && saved) || (light ? LIGHT_THEME : DEFAULT_THEME)
+    const tones = mode === 'light' ? LIGHT_TONES : TONES
     const gitc = GIT_COLOR[mode]
     const now = await $.clock.now()
     const live = (await activities($)).filter(a => now - a.at < (a.state === 'running' ? RUNNING_MAX_MS : ACTIVITY_TTL_MS))
