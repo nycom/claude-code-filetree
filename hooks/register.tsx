@@ -102,8 +102,8 @@ let paneRoom = 0
 let sizeTick = false
 // Light or dark without a skin: Claude Code's theme, or under auto the OS's (a skin's while it stands in for the OS).
 let light = false
-let claudeTheme: unknown
-let onWin = false
+// Theme auto on Windows or WSL: the pane asks the OS even under a skin, and leaves out a skin of the other mode.
+let winAuto = false
 let prefsRead = 0
 let still = false
 const marks = new Map<string, string>()
@@ -178,13 +178,10 @@ async function appearance($: EngineInterface): Promise<'light' | 'dark'> {
   }
 }
 
-// Under theme auto a skin on in the skins mod says light or dark itself, so the OS is not asked; skins cannot ask Windows, so there the pane still does.
-const asksOS = (theme: unknown, windows: boolean, skin: PanelTheme | null | undefined) => theme === 'auto' && (!skin || windows)
-
 // The skins write passes its own value in, so the pane never reads the skin it is being told about.
 async function readPrefs($: EngineInterface, skinSet?: { value?: PanelTheme | null }): Promise<void> {
   const read = ++prefsRead
-  const was = { light, still, claudeTheme, onWin }
+  const was = { light, still, winAuto }
   let auto = false
   let isLit = false
   let reduce = still
@@ -195,7 +192,8 @@ async function readPrefs($: EngineInterface, skinSet?: { value?: PanelTheme | nu
     const rows = await $.config.list()
     theme = rows.find(r => r.key === 'theme')?.value
     windows = await onWindows($)
-    auto = asksOS(theme, windows, skin)
+    // Under theme auto a skin on in the skins mod says light or dark itself, so the OS is not asked; skins cannot ask Windows, so there the pane still does.
+    auto = theme === 'auto' && (!skin || windows)
     isLit = isLight(theme, auto ? await appearance($) : (skin?.mode ?? 'dark'))
     reduce = rows.find(r => r.key === 'reduceMotion')?.value === true
   } catch {}
@@ -203,11 +201,10 @@ async function readPrefs($: EngineInterface, skinSet?: { value?: PanelTheme | nu
   if (read !== prefsRead) return
   autoTheme = auto
   light = isLit
-  claudeTheme = theme
-  onWin = windows
+  winAuto = theme === 'auto' && windows
   still = reduce
   pollAppearance($)
-  if (light !== was.light || still !== was.still || claudeTheme !== was.claudeTheme || onWin !== was.onWin) $.ui.invalidate('ui.render')
+  if (light !== was.light || still !== was.still || winAuto !== was.winAuto) $.ui.invalidate('ui.render')
 }
 
 // Pane open state: set where this plugin opens the pane, by ui.close, and by a render (a pane the host restored raises no open).
@@ -389,11 +386,22 @@ async function reset($: EngineInterface, root: string, focus = false): Promise<v
 const titleOf = (root: string) => `Files: ${root.split('/').pop() || root}`
 
 // Asks the engine's pane record, not paneOpen: the desktop app can draw a Pane the engine never opened (its own tab restore).
-function panePlaced($: EngineInterface): Promise<boolean> {
-  return $.ui
-    .panes()
-    .then(panes => panes.some(p => p.id === PANE && p.isPlaced))
-    .catch(() => false)
+// An engine without $.ui.panes, or one that refuses it, falls back to paneOpen.
+export async function panePlaced($: EngineInterface): Promise<boolean> {
+  try {
+    return (await $.ui.panes()).some(p => p.id === PANE && p.isPlaced)
+  } catch {
+    return paneOpen
+  }
+}
+
+// Whether the session draws on a terminal; an engine without $.session.surfaces, or one that refuses it, counts as one.
+export async function onTerminal($: EngineInterface): Promise<boolean> {
+  try {
+    return (await $.session.surfaces()).includes('terminal')
+  } catch {
+    return true
+  }
 }
 
 // Auto-open: only on a real file change, and never re-open a pane that is already showing.
@@ -1188,7 +1196,7 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'filetree' }, async ($, e) => {
     // The layout and width are the terminal's; the desktop app runs the engine headless and docks the pane itself.
-    if ((await $.session.surfaces()).includes('terminal')) {
+    if (await onTerminal($)) {
       if (!e.presentation.isFullscreen) return { text: 'filetree shows in the sidebar, which needs the fullscreen layout. Run /tui fullscreen, then /filetree.' }
       if (e.presentation.columns < 110) return { text: 'filetree shows in the sidebar, which needs a terminal at least 110 columns wide. Widen it, then run /filetree.' }
     }
@@ -1394,7 +1402,7 @@ export const register: Register = (on, options) => {
     // Decided here from the skin just read, so a skin going on or off draws right before readPrefs settles.
     const own = light ? 'light' : 'dark'
     const skin = (await $.state.get(SKIN_THEME)).value
-    const drawn = skin && (!asksOS(claudeTheme, onWin, skin) || skin.mode === own) ? skin : null
+    const drawn = skin && (!winAuto || skin.mode === own) ? skin : null
     const mode = drawn?.mode ?? own
     // Read even when unused, so a theme that turns up later redraws the pane.
     const saved = (await $.state.get(THEME)).value

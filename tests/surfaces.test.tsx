@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
+import { onTerminal, panePlaced } from '../hooks/register'
 import { ancestorsOf, cells, formatSize, isLight, middle, parseTheme, replaceChildren, stamp, toNodes } from '../hooks/tree'
 
 type World = {
@@ -26,9 +27,12 @@ type World = {
   openFails?: boolean
   unplaced?: boolean
   surfaces?: string[]
+  panesFail?: boolean
+  surfacesFail?: boolean
 }
 type Ran = string[][]
 const opens: unknown[] = []
+const closes: unknown[] = []
 const envs: Record<string, string>[] = []
 
 function world(on: any, w: World, ran: Ran) {
@@ -46,8 +50,19 @@ function world(on: any, w: World, ran: Ran) {
     panes.set(e.id, panes.get(e.id) || !w.unplaced)
     return { value: { isPlaced: panes.get(e.id) } }
   })
-  on('ui.panes', () => ({ value: [...panes].map(([id, isPlaced]) => ({ id, title: id, isShown: true, isFocused: false, isPlaced })) }))
-  on('session.surfaces', () => ({ value: w.surfaces ?? ['terminal'] }))
+  on('ui.panes', () => {
+    if (w.panesFail) throw new Error('unknown method')
+    return { value: [...panes].map(([id, isPlaced]) => ({ id, title: id, isShown: true, isFocused: false, isPlaced })) }
+  })
+  on('ui.close', (_$: any, e: any) => {
+    closes.push(e)
+    panes.delete(e.id)
+    return { value: undefined }
+  })
+  on('session.surfaces', () => {
+    if (w.surfacesFail) throw new Error('unknown method')
+    return { value: w.surfaces ?? ['terminal'] }
+  })
   on('ui.toast', (_$: any, e: any) => {
     ran.push(['toast', String(e.text ?? e.message ?? JSON.stringify(e))])
     return { value: undefined }
@@ -425,11 +440,7 @@ test('sidebar only: no pane in the default layout, and an inline pane closes its
   const root = '/home/k/proj'
   const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '' }, ran)
   const opened = opens
-  const closed: unknown[] = []
-  on('ui.close', (_$: any, e: any) => {
-    closed.push(e)
-    return { value: undefined }
-  })
+  const closed = closes.length
   await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
   await clock.settle()
   const before = opened.length
@@ -438,7 +449,7 @@ test('sidebar only: no pane in the default layout, and an inline pane closes its
   expect(opened.length).toBe(before)
   const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: { ...paneProps(60), placement: 'inline' } })
   await clock.settle()
-  expect(closed.length).toBeGreaterThan(0)
+  expect(closes.length).toBeGreaterThan(closed)
   await ui.unmount()
 })
 
@@ -1067,7 +1078,6 @@ test('auto-open: an inline pane is never opened by a write', { timeoutMs: 20_000
   const ran: Ran = []
   const root = '/home/k/proj'
   const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '' }, ran)
-  on('ui.close', () => ({ value: undefined }))
   await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
   await clock.settle()
   const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: { ...paneProps(60), placement: 'inline' } })
@@ -1219,6 +1229,72 @@ test('auto-open: three concurrent edits open the pane once', { timeoutMs: 20_000
   expect(opens.length).toBe(start + 1)
 })
 
+// Stands in for the person's close of the pane: raises ui.close for its id.
+const closer = {
+  name: 'closer',
+  register(on: any) {
+    on('command.run', { command: 'close-pane' }, async ($: any) => {
+      await $.ui.close({ id: 'filetree' })
+      return { text: '' }
+    })
+  },
+}
+
+test('auto-open: close the pane, then the next file change re-opens it once', { plugins: [closer], timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '' }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const start = opens.length
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'a', new_string: 'b' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start + 1)
+  await $.command.run({ command: 'close-pane', args: '', origin: { kind: 'person' }, presentation: { isFullscreen: true, columns: 200 } } as any)
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'b', new_string: 'c' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start + 2)
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'c', new_string: 'd' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start + 2)
+})
+
+test('an engine without $.ui.panes or $.session.surfaces: the pane falls back to its own open flag and the terminal checks still apply', async () => {
+  expect(await panePlaced({ ui: {} } as any)).toBe(false)
+  expect(await panePlaced({ ui: { panes: () => Promise.reject(new Error('unknown method')) } } as any)).toBe(false)
+  expect(await onTerminal({ session: {} } as any)).toBe(true)
+  expect(await onTerminal({ session: { surfaces: () => Promise.reject(new Error('unknown method')) } } as any)).toBe(true)
+  expect(await onTerminal({ session: { surfaces: async () => ['desktop'] } } as any)).toBe(false)
+})
+
+test('auto-open: when $.ui.panes refuses, a write opens the pane once and the hook never throws', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '', panesFail: true }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const start = opens.length
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/a.txt`, old_string: 'a', new_string: 'b' } as any)
+  await clock.settle()
+  await $.tool.call({ tool: 'Write', file_path: `${root}/a.txt`, content: 'c' } as any)
+  await clock.settle()
+  expect(opens.length).toBe(start + 1)
+})
+
+test('when $.session.surfaces refuses, /filetree still applies the terminal checks', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '', surfacesFail: true }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const start = opens.length
+  const main = await $.command.run({ command: 'filetree', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 200 } } as any)
+  await clock.settle()
+  expect(JSON.stringify(main)).toContain('/tui fullscreen')
+  expect(opens.length).toBe(start)
+})
+
 test('theme auto under WSL follows the Windows appearance through reg.exe', { timeoutMs: 20_000 }, async ($, on) => {
   const ran: Ran = []
   const root = '/home/k/proj'
@@ -1307,6 +1383,23 @@ test('with skins off the pane keeps the Omarchy theme; a light skin draws its ow
   shown = await texts(ui)
   for (const c of [...LIGHT_GIT, '"activeBg":"#e8c8da"', '"fg":"#1f1f1f"', '#a3206c', '#6b6b6b']) expect(shown).toContain(c)
   for (const c of ['#1a1b26', '#33467c', '#c0caf5', '#7aa2f7', '"backgroundColor":"#', ...DARK_GIT]) expect(shown).not.toContain(c)
+  await ui.unmount()
+})
+
+test('a skins version that publishes no theme leaves the pane on its own light or dark detection under theme auto', { plugins: [{ name: 'skins', register(on: any) { on('command.run', { command: 'skin' }, () => ({ text: '' })) } }], timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k/proj'
+  const clock = world(on, { os: 'darwin', env: { HOME: '/Users/k', TMPDIR: '/tmp/' }, cwd: root, top: '', dirs: { [root]: [['a.ts', 'file']] }, status: '', numstat: '', appearance: '' }, ran)
+  on('config.list', () => themeSetting('auto'))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await $.command.run(skin(DRACULA))
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  const shown = await texts(ui)
+  expect(shown).toContain('"activeBg":"#9ca3af","hoverBg":"#e7e8e7"')
+  expect(shown).not.toContain('#44475a')
+  expect(ran.some(a => a[0] === 'defaults')).toBe(true)
   await ui.unmount()
 })
 
