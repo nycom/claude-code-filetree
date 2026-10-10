@@ -24,16 +24,18 @@
 The repo is its own plugin marketplace. Run this in the terminal:
 
 ```bash
-claude plugin marketplace add data-goblin/claude-code-filetree
+claude plugin marketplace add nycom/claude-code-filetree
 claude plugin install filetree@claude-code-filetree
 ```
 
 Or inside a Claude Code session:
 
 ```text
-/plugin marketplace add data-goblin/claude-code-filetree
+/plugin marketplace add nycom/claude-code-filetree
 /plugin install filetree@claude-code-filetree
 ```
+
+Or take it with the rest of the set (savvy-progress, skins, cache-tax) from one marketplace: `/plugin marketplace add nycom/claude-kit`, then `/plugin install filetree@claude-kit`.
 
 Installed it as `filetree@filetree` before the repository was renamed? Nothing to do: that install keeps loading and keeps receiving updates.
 
