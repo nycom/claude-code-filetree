@@ -1187,6 +1187,26 @@ test('desktop app: a pane the app redraws before any open does not stop the firs
   await ui.unmount()
 })
 
+test('desktop app: a pane the app redraws before any open is not opened by a cwd change', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k'
+  const sub = `${root}/sub`
+  const w: World = { os: 'darwin', env: { HOME: '/Users/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file'], ['sub', 'dir']], [sub]: [['b.txt', 'file']] }, status: '', numstat: '', surfaces: ['desktop'] }
+  const clock = world(on, w, ran)
+  on('classic.CwdChanged', () => ({}))
+  await $.session.start({ cwd: root, surface: null, isInteractive: false } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'desktop', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  const start = opens.length
+  w.cwd = sub
+  await $.classic.CwdChanged({ old_cwd: root, new_cwd: sub } as any)
+  await clock.settle()
+  expect(await texts(ui)).toContain('b.txt')
+  expect(opens.length).toBe(start)
+  await ui.unmount()
+})
+
 test('auto-open: three concurrent edits open the pane once', { timeoutMs: 20_000 }, async ($, on) => {
   const ran: Ran = []
   const root = '/home/k/proj'
@@ -1445,6 +1465,62 @@ test('a skin turned off, on and switched in quick succession ends on the last sk
   await clock.advance(180_000)
   await clock.settle()
   expect(probes()).toBe(seen)
+  await ui.unmount()
+})
+
+// Holds the next config read, so the frame drawn before the pane's own prefs settle can be checked.
+function heldTheme(on: any, clock: any, value: string) {
+  const held = { ms: 0 }
+  on('config.list', async () => {
+    const ms = held.ms
+    held.ms = 0
+    if (ms) await clock.sleep(ms)
+    return themeSetting(value)
+  })
+  return held
+}
+
+test('a skin going on under theme auto draws in the first frame, before the pane re-reads its settings', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k/proj'
+  const clock = world(on, { ...gitWorld(root), os: 'darwin', env: { HOME: '/Users/k', TMPDIR: '/tmp/' }, appearance: '' }, ran)
+  const held = heldTheme(on, clock, 'auto')
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  expect(await texts(ui)).toContain(LIGHT_GIT[0])
+  held.ms = 5_000
+  await $.command.run(skin(DRACULA))
+  await clock.settle()
+  for (const c of [...DARK_GIT, '"activeBg":"#44475a"']) expect(await texts(ui)).toContain(c)
+  await clock.advance(5_000)
+  await clock.settle()
+  for (const c of [...DARK_GIT, '"activeBg":"#44475a"']) expect(await texts(ui)).toContain(c)
+  await ui.unmount()
+})
+
+test('a skin going off under a fixed theme of the other mode draws that theme in the first frame', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, gitWorld(root), ran)
+  const held = heldTheme(on, clock, 'light')
+  await $.command.run(skin(DRACULA))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  expect(await texts(ui)).toContain(DARK_GIT[0])
+  held.ms = 5_000
+  await $.command.run(skin(null))
+  await clock.settle()
+  let shown = await texts(ui)
+  for (const c of LIGHT_GIT) expect(shown).toContain(c)
+  for (const c of [...DARK_GIT, '#44475a']) expect(shown).not.toContain(c)
+  await clock.advance(5_000)
+  await clock.settle()
+  shown = await texts(ui)
+  for (const c of LIGHT_GIT) expect(shown).toContain(c)
   await ui.unmount()
 })
 

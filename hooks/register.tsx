@@ -1,7 +1,7 @@
 import { type BuiltinToolResults, type EngineInterface, type Register, type Timer, update } from 'claude-code'
 import { openCommand } from './open'
 
-import type { Activity, FileNode, FileTree, Theme } from '../types'
+import type { Activity, FileNode, FileTree, PanelTheme, Theme } from '../types'
 import { BRANCH_ICON, chainOf, type GitAction, gitActions, LIGHT_TONES, readOnly, readTargets, resolve, TONES } from './git'
 import type { RowSpec, RowsProps, Seg } from './rows'
 import { CHEVRON_CLOSED, CHEVRON_OPEN, fileIcon, GIT_COLOR } from './icons'
@@ -100,7 +100,10 @@ let pointer = true
 let view = { from: 0, max: 0 }
 let paneRoom = 0
 let sizeTick = false
+// Light or dark without a skin: Claude Code's theme, or under auto the OS's (a skin's while it stands in for the OS).
 let light = false
+let claudeTheme: unknown
+let onWin = false
 let prefsRead = 0
 let still = false
 const marks = new Map<string, string>()
@@ -175,28 +178,36 @@ async function appearance($: EngineInterface): Promise<'light' | 'dark'> {
   }
 }
 
-async function readPrefs($: EngineInterface): Promise<void> {
+// Under theme auto a skin on in the skins mod says light or dark itself, so the OS is not asked; skins cannot ask Windows, so there the pane still does.
+const asksOS = (theme: unknown, windows: boolean, skin: PanelTheme | null | undefined) => theme === 'auto' && (!skin || windows)
+
+// The skins write passes its own value in, so the pane never reads the skin it is being told about.
+async function readPrefs($: EngineInterface, skinSet?: { value?: PanelTheme | null }): Promise<void> {
   const read = ++prefsRead
-  const was = { light, still }
+  const was = { light, still, claudeTheme, onWin }
   let auto = false
   let isLit = false
   let reduce = still
+  let theme: unknown
+  let windows = false
   try {
-    const skin = (await $.state.get(SKIN_THEME)).value
+    const skin = (skinSet ?? (await $.state.get(SKIN_THEME))).value
     const rows = await $.config.list()
-    const theme = rows.find(r => r.key === 'theme')?.value
-    // A skin on in the skins mod says light or dark itself, so the OS is not asked; skins cannot ask Windows, so there the pane still does.
-    auto = theme === 'auto' && (!skin || (await onWindows($)))
-    isLit = skin && !auto ? skin.mode === 'light' : isLight(theme, auto ? await appearance($) : 'dark')
+    theme = rows.find(r => r.key === 'theme')?.value
+    windows = await onWindows($)
+    auto = asksOS(theme, windows, skin)
+    isLit = isLight(theme, auto ? await appearance($) : (skin?.mode ?? 'dark'))
     reduce = rows.find(r => r.key === 'reduceMotion')?.value === true
   } catch {}
   // A later read has started, so this one may have read a skins theme since replaced.
   if (read !== prefsRead) return
   autoTheme = auto
   light = isLit
+  claudeTheme = theme
+  onWin = windows
   still = reduce
   pollAppearance($)
-  if (light !== was.light || still !== was.still) $.ui.invalidate('ui.render')
+  if (light !== was.light || still !== was.still || claudeTheme !== was.claudeTheme || onWin !== was.onWin) $.ui.invalidate('ui.render')
 }
 
 // Pane open state: set where this plugin opens the pane, by ui.close, and by a render (a pane the host restored raises no open).
@@ -366,7 +377,7 @@ async function reset($: EngineInterface, root: string, focus = false): Promise<v
   sizeQueue = []
   await put($, () => ({ ...emptyTree(root), showHidden: prev.showHidden, showSize: prev.root ? prev.showSize : sizeDefault }))
   // Only /filetree opens a closed pane here; an open one just takes the new root's title.
-  if (focus || (paneOpen && !noDock)) {
+  if (focus || (!noDock && (await panePlaced($)))) {
     await $.ui.open({ id: PANE, title: titleOf(root), ...(focus ? { focus: true } : {}) })
     paneShown($, true)
   }
@@ -377,15 +388,21 @@ async function reset($: EngineInterface, root: string, focus = false): Promise<v
 
 const titleOf = (root: string) => `Files: ${root.split('/').pop() || root}`
 
+// Asks the engine's pane record, not paneOpen: the desktop app can draw a Pane the engine never opened (its own tab restore).
+function panePlaced($: EngineInterface): Promise<boolean> {
+  return $.ui
+    .panes()
+    .then(panes => panes.some(p => p.id === PANE && p.isPlaced))
+    .catch(() => false)
+}
+
 // Auto-open: only on a real file change, and never re-open a pane that is already showing.
 // Never throws, so the caller still refreshes the tree; a pane left unplaced (too narrow) is opened again on the next change.
-// Asks the engine's pane record, not paneOpen: the desktop app can draw a Pane the engine never opened (its own tab restore).
 async function showOnChange($: EngineInterface): Promise<void> {
   if (opening || noDock) return
   opening = true
-  const opened = await $.ui
-    .panes()
-    .then(async panes => (panes.some(p => p.id === PANE && p.isPlaced) ? null : $.ui.open({ id: PANE, title: titleOf((await get($)).root) })))
+  const opened = await panePlaced($)
+    .then(async placed => (placed ? null : $.ui.open({ id: PANE, title: titleOf((await get($)).root) })))
     .catch(() => null)
   opening = false
   if (opened?.isPlaced) paneShown($, true)
@@ -1159,7 +1176,7 @@ export const register: Register = (on, options) => {
   // Not awaited: skins' write is not held up by the OS check.
   on('state.set', { plugin: 'skins', key: 'theme' }, async ($, e, next) => {
     const result = await next(e)
-    void readPrefs($)
+    if (result.deny === undefined) void readPrefs($, e)
     return result
   }).catch(($, e, next) => (next.called ? next(e) : undefined))
 
@@ -1368,15 +1385,16 @@ export const register: Register = (on, options) => {
       const { Box: Empty } = $.ui.resolve(e)
       return <Empty />
     }
-    // A pane the host restored is open too, so showOnChange must not open it again.
+    // A pane the host drew is showing too, so its prefs are read and the appearance poll runs for it.
     if (!paneOpen) paneShown($, true)
     const unicode = glyphSetting === 'plain' || (glyphSetting === 'auto' && (noNerd || e.surface === 'desktop'))
     const { Box, Text, Button, Input, Client } = $.ui.resolve(e)
     const t = await get($)
     // A skin on in the skins mod decides light or dark, unless the pane asks the OS itself (theme auto on Windows); then a skin of the other mode is left out.
+    // Decided here from the skin just read, so a skin going on or off draws right before readPrefs settles.
     const own = light ? 'light' : 'dark'
     const skin = (await $.state.get(SKIN_THEME)).value
-    const drawn = skin && (!autoTheme || skin.mode === own) ? skin : null
+    const drawn = skin && (!asksOS(claudeTheme, onWin, skin) || skin.mode === own) ? skin : null
     const mode = drawn?.mode ?? own
     // Read even when unused, so a theme that turns up later redraws the pane.
     const saved = (await $.state.get(THEME)).value
