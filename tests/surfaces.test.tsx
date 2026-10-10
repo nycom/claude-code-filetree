@@ -1418,6 +1418,36 @@ test('a skin going on while the appearance poll is mid-read leaves the poll stop
   await ui.unmount()
 })
 
+test('a skin turned off, on and switched in quick succession ends on the last skin, whatever the OS answers late', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k/proj'
+  const w: World = { ...gitWorld(root), os: 'darwin', env: { HOME: '/Users/k', TMPDIR: '/tmp/' }, appearance: '' }
+  const clock = world(on, w, ran)
+  on('config.list', () => themeSetting('auto'))
+  const probes = () => ran.filter(a => a[0] === 'defaults').length
+  await $.command.run(skin(DRACULA))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  w.appearanceDelays = [5_000]
+  await $.command.run(skin(null))
+  await clock.settle()
+  await $.command.run(skin(DAWN))
+  await $.command.run(skin(NORD))
+  await clock.settle()
+  await clock.advance(5_000)
+  await clock.settle()
+  const shown = await texts(ui)
+  for (const c of [...DARK_GIT, '"activeBg":"#434c5e"', '"fg":"#eceff4"']) expect(shown).toContain(c)
+  for (const c of [...LIGHT_GIT, '#9ca3af', '#e8c8da', '#44475a']) expect(shown).not.toContain(c)
+  const seen = probes()
+  await clock.advance(180_000)
+  await clock.settle()
+  expect(probes()).toBe(seen)
+  await ui.unmount()
+})
+
 const WSL_LIGHT = (root: string) => ({ ...gitWorld(root), env: { HOME: '/home/k', WSL_DISTRO_NAME: 'Ubuntu' }, appearance: '    AppsUseLightTheme    REG_DWORD    0x1\n' }) as World
 
 test('theme auto under WSL with a skin on still follows Windows through reg.exe, which skins cannot read; a skin of the other mode is left out', { plugins: [skins], timeoutMs: 20_000 }, async ($, on) => {
