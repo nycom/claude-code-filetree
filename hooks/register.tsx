@@ -109,6 +109,8 @@ let still = false
 const marks = new Map<string, string>()
 let lastSync = 0
 let noDock = false
+// Auto-open off: only /filetree opens the pane, so a pane the user closed stays closed.
+let autoOpen = true
 let home = ''
 let platform: Promise<'linux' | 'darwin' | 'win32'> | null = null
 let dirty: { root: string; files: Record<string, Change> } = { root: '', files: {} }
@@ -407,7 +409,7 @@ export async function onTerminal($: EngineInterface): Promise<boolean> {
 // Auto-open: only on a real file change, and never re-open a pane that is already showing.
 // Never throws, so the caller still refreshes the tree; a pane left unplaced (too narrow) is opened again on the next change.
 async function showOnChange($: EngineInterface): Promise<void> {
-  if (opening || noDock) return
+  if (opening || noDock || !autoOpen) return
   opening = true
   const opened = await panePlaced($)
     .then(async placed => (placed ? null : $.ui.open({ id: PANE, title: titleOf((await get($)).root) })))
@@ -1147,6 +1149,7 @@ export const register: Register = (on, options) => {
   showWrites = activity.includes('writes')
   followClaude = options?.follow !== 'off'
   sizeDefault = options?.column === 'size'
+  autoOpen = options?.autoOpen !== 'off'
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'filetree', description: 'Show the file tree; args: [path] (no path = cwd)' })
     const windows = (await $.env.get('OS')) === 'Windows_NT'

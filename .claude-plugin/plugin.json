@@ -46,6 +46,16 @@
         "off"
       ]
     },
+    "autoOpen": {
+      "type": "string",
+      "title": "Auto-open",
+      "description": "on: the pane opens by itself on the first file change and again after you close it. off: only /filetree opens it, and a pane you close stays closed (keeps the desktop header's Terminal and Browser buttons visible).",
+      "default": "on",
+      "options": [
+        "on",
+        "off"
+      ]
+    },
     "column": {
       "type": "string",
       "title": "Right column",
